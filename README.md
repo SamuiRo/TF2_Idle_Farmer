@@ -18,7 +18,7 @@ timer), logs results, and repeats next week.
 ### Install dependencies
 
 ```
-pip install -r requirements.txt
+pip install -e .
 ```
 
 **If you are on Python 3.10**, also run:

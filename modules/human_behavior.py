@@ -3,10 +3,26 @@ Human-behaviour simulation.
 
 Responsibilities:
 - Randomised sleep intervals that mimic natural user pauses
-- Smooth Bézier-curve mouse movement
-- Occasional random key presses
+- Smooth Bézier-curve mouse movement (pyautogui — affects cursor position only,
+  never sends keyboard input globally)
+- Occasional random key presses sent DIRECTLY to the TF2 window via PostMessage
 - Full idle-session loop with periodic micro-activity
 - MOTD dismissal after server connect
+- Item-drop notification dismissal during idle
+
+Key-press architecture
+----------------------
+All keyboard input is routed through modules._win_input.press_key_in_tf2() /
+press_keys_in_tf2(), which use WM_KEYDOWN/WM_KEYUP sent via PostMessage to the
+TF2 window handle (class "Valve001").  This means:
+
+  * Keys are delivered only to TF2 — not to whatever window the user has open.
+  * The user's active window retains focus at all times.
+  * Works correctly for TF2 in windowed (-sw) and borderless windowed modes.
+
+Mouse movement still uses pyautogui.moveTo() because moving the cursor globally
+is intentional (it mimics a human using the machine) and does not interfere with
+typing or other apps.
 """
 
 import random
@@ -15,6 +31,7 @@ from typing import Callable
 
 import pyautogui
 
+from modules._win_input import press_key_in_tf2, press_keys_in_tf2
 from modules.logger import log
 
 
@@ -30,6 +47,11 @@ _BEZIER_STEPS_MIN = 20
 _BEZIER_STEPS_MAX = 40
 _BEZIER_STEP_DELAY_MIN = 0.010  # seconds between each micro-move
 _BEZIER_STEP_DELAY_MAX = 0.030
+
+# How often to check for (and dismiss) item-drop notifications during idle.
+# TF2 shows a small on-screen popup; pressing Enter or Escape closes it.
+# Set to 0 to disable periodic dismiss checks.
+_DROP_DISMISS_INTERVAL_SEC = 120  # every ~2 min
 
 
 # ---------------------------------------------------------------------------
@@ -58,8 +80,12 @@ def dismiss_motd(attempts: int = 8, interval_sec: float = 4.0) -> None:
 
     Keys sent each attempt: Enter × 4, then Space, then F — this covers all
     common MOTD implementations (HTML overlay, text panel, legacy dialog).
-    The death-drop notification window does NOT need to be closed — it does
-    not block the drop timer and disappears on its own.
+
+    All key presses are sent directly to the TF2 window via PostMessage and
+    do NOT affect any other application the user may have open.
+
+    The death-drop notification window does NOT need to be closed here — it
+    does not block the drop timer.  Use dismiss_item_drop() for that.
 
     Args:
         attempts:    How many times to repeat the key sequence.
@@ -71,16 +97,13 @@ def dismiss_motd(attempts: int = 8, interval_sec: float = 4.0) -> None:
 
     for i in range(attempts):
         try:
-            # Send Enter multiple times first — it's the most universal confirm key
+            # Enter × 4 is the most universal confirm key for MOTD panels
             for _ in range(4):
-                pyautogui.press("return")
-                time.sleep(0.2)
+                press_key_in_tf2("return", delay_after=0.20)
 
-            # Space and F as fallbacks for servers using different bindings
-            pyautogui.press("space")
-            time.sleep(0.2)
-            pyautogui.press("f")
-            time.sleep(0.2)
+            # Space and F as fallbacks for servers using non-standard bindings
+            press_key_in_tf2("space", delay_after=0.20)
+            press_key_in_tf2("f",     delay_after=0.20)
 
             log.debug(f"MOTD dismiss attempt {i + 1}/{attempts} sent.")
         except Exception as exc:  # noqa: BLE001
@@ -92,7 +115,27 @@ def dismiss_motd(attempts: int = 8, interval_sec: float = 4.0) -> None:
     log.info("MOTD dismiss sequence complete.")
 
 
-def idle_session(duration_minutes: float) -> None:
+def dismiss_item_drop() -> None:
+    """
+    Dismiss the item-drop notification popup that TF2 shows when a weekly
+    drop is received.
+
+    TF2 displays a small floating notification in-game when an item drops.
+    Pressing Enter (or Escape) closes it.  This function sends both keys
+    directly to the TF2 window so the popup does not linger on screen.
+
+    It is safe to call this even when no popup is visible — the keys are
+    harmless no-ops in that state.
+    """
+    log.debug("Sending item-drop dismiss keys to TF2 window…")
+    try:
+        press_keys_in_tf2(["return", "escape"], inter_key_delay=0.15)
+        log.debug("Item-drop dismiss keys sent.")
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"Item-drop dismiss failed (non-critical): {exc}")
+
+
+def idle_session(duration_minutes: float, mouse_activity: bool = True) -> None:
     """
     Keep the process alive for *duration_minutes* while occasionally
     producing small human-like interactions (mouse moves / key presses).
@@ -100,32 +143,60 @@ def idle_session(duration_minutes: float) -> None:
     The session is split into variable-length sleep windows (3–10 min each).
     At the end of each window there is a 40 % chance of a micro-action.
 
+    Additionally, every ~2 minutes the function sends a quick dismiss sequence
+    to the TF2 window to close any item-drop popup that may have appeared.
+    This is non-intrusive because the keys go only to TF2, not globally.
+
     Args:
         duration_minutes: Total idle time in minutes (float for precision).
+        mouse_activity:   When False, mouse movement is skipped entirely.
+                          Controlled by ``[behavior] mouse_activity`` in
+                          settings.toml.  Defaults to True.
     """
     total_seconds = duration_minutes * 60
     end_time = time.time() + total_seconds
-    log.info(f"Idle session started — duration: {duration_minutes:.1f} min")
+    last_drop_dismiss = time.time()
 
-    actions: list[Callable[[], None]] = [
-        move_mouse_naturally,
-        random_key_press,
-        _do_nothing,
-    ]
+    log.info(
+        f"Idle session started — duration: {duration_minutes:.1f} min"
+        f"{'' if mouse_activity else ' (mouse movement disabled)'}"
+    )
+
+    actions: list[Callable[[], None]] = (
+        [move_mouse_naturally, random_key_press, _do_nothing]
+        if mouse_activity
+        else [random_key_press, _do_nothing]
+    )
 
     while time.time() < end_time:
         remaining = end_time - time.time()
         if remaining <= 0:
             break
 
-        # Sleep window: 3–10 min, but never exceed remaining time
-        sleep_time = min(random.uniform(180, 600), remaining)
+        # Sleep window: 3–10 min, but never exceed remaining time.
+        # We wake up at least every _DROP_DISMISS_INTERVAL_SEC so the drop
+        # popup is dismissed in a timely manner.
+        max_sleep = (
+            min(_DROP_DISMISS_INTERVAL_SEC, remaining)
+            if _DROP_DISMISS_INTERVAL_SEC > 0
+            else remaining
+        )
+        sleep_time = min(random.uniform(180, 600), max_sleep)
         log.debug(f"Sleeping {sleep_time / 60:.1f} min (remaining: {remaining / 60:.1f} min)")
         time.sleep(sleep_time)
 
         if time.time() >= end_time:
             break
 
+        # --- Periodic item-drop dismiss ---
+        if (
+            _DROP_DISMISS_INTERVAL_SEC > 0
+            and time.time() - last_drop_dismiss >= _DROP_DISMISS_INTERVAL_SEC
+        ):
+            dismiss_item_drop()
+            last_drop_dismiss = time.time()
+
+        # --- Random micro-action ---
         if random.random() < _ACTION_PROBABILITY:
             action = random.choice(actions)
             log.debug(f"Performing micro-action: {action.__name__}")
@@ -141,6 +212,9 @@ def move_mouse_naturally() -> None:
     """
     Move the mouse to a random screen position along a quadratic Bézier curve
     to mimic organic, non-linear cursor movement.
+
+    Mouse movement is intentionally global (it is meant to look like a human
+    is at the machine).  It does not send any keyboard input.
     """
     try:
         start_x, start_y = pyautogui.position()
@@ -173,13 +247,19 @@ def random_key_press() -> None:
     Press a single harmless key to prevent AFK detection on servers that watch
     for keyboard inactivity.
 
+    Keys are sent directly to the TF2 window via PostMessage — they do NOT
+    affect any other window the user may have focused.
+
     Only safe, non-command keys are used (Escape, F5).
     """
     safe_keys = ["escape", "f5"]
     key = random.choice(safe_keys)
     try:
-        pyautogui.press(key)
-        log.debug(f"Key pressed: {key}")
+        ok = press_key_in_tf2(key)
+        if ok:
+            log.debug(f"Key '{key}' sent to TF2 window.")
+        else:
+            log.debug(f"Key '{key}' skipped — TF2 window not available.")
     except Exception as exc:  # noqa: BLE001
         log.warning(f"Key press skipped: {exc}")
 

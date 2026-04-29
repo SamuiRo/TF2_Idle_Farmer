@@ -109,6 +109,7 @@ def run_account_session(account: str, servers: list[str], settings: dict[str, An
     idle_min: float = timing["idle_duration_min"]
     idle_max: float = timing["idle_duration_max"]
     idle_duration: float = random.uniform(idle_min, idle_max)
+    mouse_activity: bool = settings.get("behavior", {}).get("mouse_activity", True)
 
     log.info(f"{'=' * 50}")
     log.info(f"Starting session for account: {account}")
@@ -177,16 +178,28 @@ def run_account_session(account: str, servers: list[str], settings: dict[str, An
         log.info(f"TF2 connected to {server} — beginning idle session ({idle_duration:.1f} min)")
 
         # ------------------------------------------------------------------
-        # 6. Idle session
+        # 6. Idle session  (watcher runs in background the whole time)
         # ------------------------------------------------------------------
+        watcher = drop_tracker.ConsoleLogWatcher(console_log_path, account)
+        watcher.start()
+
         session_start = time.time()
-        human_behavior.idle_session(idle_duration)
+        try:
+            human_behavior.idle_session(idle_duration, mouse_activity=mouse_activity)
+        finally:
+            # Always stop the watcher — even if idle_session raises
+            watcher.stop()
+
         actual_duration_min = (time.time() - session_start) / 60
 
         # ------------------------------------------------------------------
         # 7. Collect drops
         # ------------------------------------------------------------------
-        items = drop_tracker.check_and_save(account, console_log_path, actual_duration_min)
+        # The watcher already logged drops live; check_and_save does a final
+        # full-file scan and merges with live results before persisting.
+        items = drop_tracker.check_and_save(
+            account, console_log_path, actual_duration_min, watcher=watcher
+        )
         if items:
             log.info(f"Items received for '{account}': {items}")
         else:
