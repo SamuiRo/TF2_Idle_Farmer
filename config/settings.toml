@@ -1,0 +1,21 @@
+[paths]
+steam_exe       = "G:/Steam/steam.exe"
+tf2_cfg_dir     = "S:/SteamLibrary/steamapps/common/Team Fortress 2/tf/cfg"
+loginusers_vdf  = "G:/Steam/config/loginusers.vdf"
+# console.log is derived automatically from tf2_cfg_dir if not set here:
+# console_log   = "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/tf/console.log"
+
+[timing]
+idle_duration_min            = 65   # minutes per account (min)
+idle_duration_max            = 80   # minutes per account (max)
+pause_between_accounts_min   = 15   # seconds between accounts (min)
+pause_between_accounts_max   = 35   # seconds between accounts (max)
+steam_startup_wait           = 60   # seconds to wait for Steam to start
+tf2_startup_wait             = 90   # seconds to wait for TF2 to start
+steam_warmup_min = 30
+steam_warmup_max = 60
+
+[behavior]
+shuffle_accounts = true   # randomise account order every run
+shuffle_servers  = false   # pick a random idle server each time
+mouse_activity   = true   # move mouse during idle sessions

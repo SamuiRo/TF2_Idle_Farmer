@@ -1,0 +1,5 @@
+# TF2 idle servers — IP:PORT, one per line
+# Lines starting with # are ignored
+# These servers are known to allow AFK / idle farming
+1.1.1.1:27015
+222.222.222.222:27140

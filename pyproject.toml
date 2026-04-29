@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "TF2_Idle_Farmer"
+version = "1.0.0"
+description = "Windows automation tool for cycling Steam accounts, idling in TF2, and tracking weekly drops."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+    { name = "StarLith" },
+]
+dependencies = [
+    "psutil>=5.9.0",
+    "pyautogui>=0.9.54",
+    "schedule>=1.2.0",
+    "tomli>=2.0.0; python_version < '3.11'",
+    "vdf>=3.4",
+]
+
+[tool.setuptools]
+py-modules = ["main"]
+packages = ["modules"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501"]

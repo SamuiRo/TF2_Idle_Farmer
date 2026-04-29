@@ -1,0 +1,4 @@
+# One Steam login name per line (the AccountName from loginusers.vdf)
+# Lines starting with # are ignored
+login1
+login2
