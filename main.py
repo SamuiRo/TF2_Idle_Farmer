@@ -15,16 +15,29 @@ import argparse
 import random
 import sys
 import time
+from pathlib import Path
+from typing import Any
+
 try:
     import tomllib
 except ImportError:
-    import tomli as tomllib
-from pathlib import Path
-from typing import Any
+    import tomli as tomllib  # type: ignore[no-redef]
 
 import schedule
 
 from modules import drop_tracker, human_behavior, steam_manager, tf2_manager
+from modules.constants import (
+    CLEANUP_WAIT_MAX_SEC,
+    CLEANUP_WAIT_MIN_SEC,
+    SCHEDULE_DAY,
+    SCHEDULE_POLL_SEC,
+    SCHEDULE_TIME,
+    SECONDS_PER_MINUTE,
+    SESSION_MAP_LOAD_WAIT_MAX_SEC,
+    SESSION_MAP_LOAD_WAIT_MIN_SEC,
+    STEAM_WARMUP_MAX_SEC_DEFAULT,
+    STEAM_WARMUP_MIN_SEC_DEFAULT,
+)
 from modules.logger import log
 
 
@@ -49,6 +62,7 @@ def load_accounts(settings: dict[str, Any]) -> list[str]:
     if not accounts_path.exists():
         log.error(f"accounts.txt not found: {accounts_path}")
         sys.exit(1)
+
     accounts = [
         line.strip()
         for line in accounts_path.read_text(encoding="utf-8").splitlines()
@@ -72,6 +86,7 @@ def load_servers(settings: dict[str, Any]) -> list[str]:
     if not servers_path.exists():
         log.error(f"servers.txt not found: {servers_path}")
         sys.exit(1)
+
     servers = [
         line.strip()
         for line in servers_path.read_text(encoding="utf-8").splitlines()
@@ -80,6 +95,7 @@ def load_servers(settings: dict[str, Any]) -> list[str]:
     if not servers:
         log.error("servers.txt is empty — no idle servers defined.")
         sys.exit(1)
+
     log.info(f"Servers loaded: {servers}")
     return servers
 
@@ -88,7 +104,11 @@ def load_servers(settings: dict[str, Any]) -> list[str]:
 # Core session logic
 # ---------------------------------------------------------------------------
 
-def run_account_session(account: str, servers: list[str], settings: dict[str, Any]) -> bool:
+def run_account_session(
+    account: str,
+    servers: list[str],
+    settings: dict[str, Any],
+) -> bool:
     """
     Execute a full idle farming session for *account*.
 
@@ -97,6 +117,7 @@ def run_account_session(account: str, servers: list[str], settings: dict[str, An
     """
     paths = settings["paths"]
     timing = settings["timing"]
+    behavior = settings.get("behavior", {})
 
     steam_exe: str = paths["steam_exe"]
     loginusers_vdf: str = paths["loginusers_vdf"]
@@ -106,14 +127,15 @@ def run_account_session(account: str, servers: list[str], settings: dict[str, An
         str(Path(tf2_cfg_dir).parent / "console.log"),
     )
 
-    idle_min: float = timing["idle_duration_min"]
-    idle_max: float = timing["idle_duration_max"]
-    idle_duration: float = random.uniform(idle_min, idle_max)
-    mouse_activity: bool = settings.get("behavior", {}).get("mouse_activity", True)
+    idle_duration: float = random.uniform(
+        timing["idle_duration_min"],
+        timing["idle_duration_max"],
+    )
+    mouse_activity: bool = behavior.get("mouse_activity", True)
 
-    log.info(f"{'=' * 50}")
+    log.info("=" * 50)
     log.info(f"Starting session for account: {account}")
-    log.info(f"{'=' * 50}")
+    log.info("=" * 50)
 
     try:
         # ------------------------------------------------------------------
@@ -122,7 +144,7 @@ def run_account_session(account: str, servers: list[str], settings: dict[str, An
         if steam_manager.is_steam_running():
             log.info("Steam is already running — shutting it down first.")
             steam_manager.quit_steam(steam_exe)
-            human_behavior.wait(5, 10)
+            human_behavior.wait(CLEANUP_WAIT_MIN_SEC, CLEANUP_WAIT_MAX_SEC)
 
         # ------------------------------------------------------------------
         # 2. Switch account
@@ -137,13 +159,15 @@ def run_account_session(account: str, servers: list[str], settings: dict[str, An
             timeout_sec=timing["steam_startup_wait"]
         )
         if not steam_ready:
-            log.error(f"Steam did not start in time for account '{account}' — skipping.")
+            log.error(
+                f"Steam did not start in time for account '{account}' — skipping."
+            )
             return False
 
-        # Additional human-like delay after Steam is visible (let it fully initialise)
+        # Additional human-like delay after Steam is visible
         human_behavior.wait(
-            timing.get("steam_warmup_min", 30),
-            timing.get("steam_warmup_max", 60),
+            timing.get("steam_warmup_min", STEAM_WARMUP_MIN_SEC_DEFAULT),
+            timing.get("steam_warmup_max", STEAM_WARMUP_MAX_SEC_DEFAULT),
         )
 
         # ------------------------------------------------------------------
@@ -168,35 +192,40 @@ def run_account_session(account: str, servers: list[str], settings: dict[str, An
             steam_manager.quit_steam(steam_exe)
             return False
 
-        # Extra wait for TF2 to load map and connect via autoexec
-        human_behavior.wait(20, 40)
+        # Wait for map load + autoexec connect
+        human_behavior.wait(
+            SESSION_MAP_LOAD_WAIT_MIN_SEC, SESSION_MAP_LOAD_WAIT_MAX_SEC
+        )
 
         # Dismiss the server MOTD / welcome screen — without this the drop
         # timer does not start.  Death-drop popups do NOT need dismissal.
         human_behavior.dismiss_motd()
 
-        log.info(f"TF2 connected to {server} — beginning idle session ({idle_duration:.1f} min)")
+        log.info(
+            f"TF2 connected to {server} — "
+            f"beginning idle session ({idle_duration:.1f} min)"
+        )
 
         # ------------------------------------------------------------------
-        # 6. Idle session  (watcher runs in background the whole time)
+        # 6. Idle session (watcher runs in background the whole time)
         # ------------------------------------------------------------------
         watcher = drop_tracker.ConsoleLogWatcher(console_log_path, account)
         watcher.start()
 
         session_start = time.time()
         try:
-            human_behavior.idle_session(idle_duration, mouse_activity=mouse_activity)
+            human_behavior.idle_session(
+                idle_duration, mouse_activity=mouse_activity
+            )
         finally:
             # Always stop the watcher — even if idle_session raises
             watcher.stop()
 
-        actual_duration_min = (time.time() - session_start) / 60
+        actual_duration_min = (time.time() - session_start) / SECONDS_PER_MINUTE
 
         # ------------------------------------------------------------------
         # 7. Collect drops
         # ------------------------------------------------------------------
-        # The watcher already logged drops live; check_and_save does a final
-        # full-file scan and merges with live results before persisting.
         items = drop_tracker.check_and_save(
             account, console_log_path, actual_duration_min, watcher=watcher
         )
@@ -209,15 +238,17 @@ def run_account_session(account: str, servers: list[str], settings: dict[str, An
         # 8. Clean up
         # ------------------------------------------------------------------
         tf2_manager.quit_tf2()
-        human_behavior.wait(5, 10)
+        human_behavior.wait(CLEANUP_WAIT_MIN_SEC, CLEANUP_WAIT_MAX_SEC)
         steam_manager.quit_steam(steam_exe)
 
-        log.info(f"Session completed for '{account}' — duration: {actual_duration_min:.1f} min")
+        log.info(
+            f"Session completed for '{account}' — "
+            f"duration: {actual_duration_min:.1f} min"
+        )
         return True
 
     except Exception as exc:  # noqa: BLE001
         log.exception(f"Unexpected error during session for '{account}': {exc}")
-        # Best-effort cleanup
         _emergency_cleanup()
         return False
 
@@ -264,9 +295,7 @@ def run_weekly_farm() -> None:
                 timing["pause_between_accounts_max"],
             )
 
-    # ------------------------------------------------------------------
     # Final summary
-    # ------------------------------------------------------------------
     log.info("=== Session results ===")
     for acc, ok in results.items():
         status = "✓ success" if ok else "✗ skipped"
@@ -282,15 +311,17 @@ def run_weekly_farm() -> None:
 
 def run_with_scheduler() -> None:
     """Register the weekly job and block forever."""
-    log.info("Scheduler mode: weekly run every Monday at 09:00.")
-    schedule.every().monday.at("09:00").do(run_weekly_farm)
+    log.info(
+        f"Scheduler mode: weekly run every {SCHEDULE_DAY} at {SCHEDULE_TIME}."
+    )
+    getattr(schedule.every(), SCHEDULE_DAY).at(SCHEDULE_TIME).do(run_weekly_farm)
 
     # Run immediately on first start so we don't wait a full week
     run_weekly_farm()
 
     while True:
         schedule.run_pending()
-        time.sleep(60)
+        time.sleep(SCHEDULE_POLL_SEC)
 
 
 # ---------------------------------------------------------------------------
@@ -302,7 +333,10 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--schedule",
         action="store_true",
-        help="Run in scheduler mode (repeats every Monday at 09:00).",
+        help=(
+            f"Run in scheduler mode "
+            f"(repeats every {SCHEDULE_DAY} at {SCHEDULE_TIME})."
+        ),
     )
     return parser.parse_args()
 

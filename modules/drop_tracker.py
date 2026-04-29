@@ -9,34 +9,39 @@ Responsibilities:
 - Live-tail console.log during a session via ConsoleLogWatcher
 """
 
+from __future__ import annotations
+
 import json
 import re
 import threading
 import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from modules.constants import (
+    CONSOLE_LOG_POLL_INTERVAL_SEC,
+    DROP_LOG_PATTERNS,
+    DROPS_TIMESTAMP_TIMESPEC,
+    WEEKLY_SUMMARY_DAYS,
+)
 from modules.logger import log
+
+if TYPE_CHECKING:
+    pass  # kept for future type-only imports
 
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
-# Regex patterns that TF2 console.log uses when a weekly drop occurs.
-# The game outputs something like:
-#   TF_PLAYER_DROP_ITEM
-#   You have found a The Holy Mackerel!
-#
-# Both "found" and "received" variants are matched for robustness.
-# Quotes around the item name (some server configs) are stripped.
-_DROP_PATTERNS: list[re.Pattern[str]] = [
-    re.compile(r'You have (?:found|received) a "?(.+?)"?!', re.IGNORECASE),
-]
-
 DATA_DIR = Path(__file__).parent.parent / "data"
 DROPS_FILE = DATA_DIR / "drops.json"
+
+# Compiled regex patterns (compiled once at import time)
+_COMPILED_DROP_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE) for p in DROP_LOG_PATTERNS
+]
 
 
 # ---------------------------------------------------------------------------
@@ -58,17 +63,17 @@ class ConsoleLogWatcher:
 
     The watcher polls the file every ``poll_interval`` seconds, tracking the
     read position so it only processes *new* lines — not the whole file each
-    time.  When the session ends, ``stop()`` does one final scan to make sure
-    nothing written in the last poll window is missed.
+    time.  When the session ends, :meth:`stop` does one final scan to make
+    sure nothing written in the last poll window is missed.
 
-    It is safe to call ``stop()`` multiple times.
+    It is safe to call :meth:`stop` multiple times.
     """
 
     def __init__(
         self,
         console_log_path: str,
         account: str,
-        poll_interval: float = 10.0,
+        poll_interval: float = CONSOLE_LOG_POLL_INTERVAL_SEC,
     ) -> None:
         self._path = Path(console_log_path)
         self._account = account
@@ -128,7 +133,7 @@ class ConsoleLogWatcher:
 
     def _scan(self, text: str) -> None:
         """Check new text for drop messages and log each one immediately."""
-        for pattern in _DROP_PATTERNS:
+        for pattern in _COMPILED_DROP_PATTERNS:
             for match in pattern.finditer(text):
                 item = match.group(1).strip()
                 if not item:
@@ -137,7 +142,10 @@ class ConsoleLogWatcher:
                     if item in self.found_items:
                         continue
                     self.found_items.append(item)
-                log.info(f"🎁 DROP DETECTED (live): '{item}' — account: '{self._account}'")
+                log.info(
+                    f"🎁 DROP DETECTED (live): '{item}' — "
+                    f"account: '{self._account}'"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -148,9 +156,9 @@ def parse_console_log(console_log_path: str) -> list[str]:
     """
     Scan *console_log_path* for item-drop lines and return the item names.
 
-    Used at the end of a session as a final authoritative read.
-    If a ConsoleLogWatcher was active during the session, pass its
-    ``found_items`` list directly to ``save_drop`` instead of calling this.
+    Used at the end of a session as a final authoritative read.  If a
+    :class:`ConsoleLogWatcher` was active during the session, pass its
+    ``found_items`` list directly to :func:`save_drop` instead of calling this.
 
     Args:
         console_log_path: Full path to TF2's console.log file.
@@ -170,7 +178,7 @@ def parse_console_log(console_log_path: str) -> list[str]:
         return []
 
     found_items: list[str] = []
-    for pattern in _DROP_PATTERNS:
+    for pattern in _COMPILED_DROP_PATTERNS:
         for match in pattern.finditer(content):
             item = match.group(1).strip()
             if item and item not in found_items:
@@ -193,8 +201,8 @@ def save_drop(
     Append a drop record for *account* to drops.json.
 
     Args:
-        account: Steam login name.
-        items: List of item names obtained during the session.
+        account:              Steam login name.
+        items:                List of item names obtained during the session.
         session_duration_min: How long the idle session ran (minutes).
     """
     DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -202,7 +210,7 @@ def save_drop(
 
     record: dict[str, Any] = {
         "date": date.today().isoformat(),
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
+        "timestamp": datetime.now().isoformat(timespec=DROPS_TIMESTAMP_TIMESPEC),
         "items": items,
         "session_duration_min": round(session_duration_min, 1),
     }
@@ -212,7 +220,10 @@ def save_drop(
     data[account].append(record)
 
     _save_drops(data)
-    log.info(f"Drop record saved for '{account}': {items} ({session_duration_min:.1f} min)")
+    log.info(
+        f"Drop record saved for '{account}': "
+        f"{items} ({session_duration_min:.1f} min)"
+    )
 
 
 def check_and_save(
@@ -230,10 +241,11 @@ def check_and_save(
     window, and the two lists are merged.
 
     Args:
-        account: Steam login name.
-        console_log_path: Path to console.log.
+        account:              Steam login name.
+        console_log_path:     Path to console.log.
         session_duration_min: Session length in minutes.
-        watcher: Optional ConsoleLogWatcher that ran during the session.
+        watcher:              Optional :class:`ConsoleLogWatcher` that ran
+                              during the session.
 
     Returns:
         List of item names found (may be empty).
@@ -247,7 +259,9 @@ def check_and_save(
         items = list(watcher.found_items)
         for item in final_items:
             if item not in items:
-                log.info(f"🎁 DROP found in final scan (missed by watcher): '{item}'")
+                log.info(
+                    f"🎁 DROP found in final scan (missed by watcher): '{item}'"
+                )
                 items.append(item)
     else:
         items = final_items
@@ -258,13 +272,14 @@ def check_and_save(
 
 def get_weekly_summary() -> dict[str, Any]:
     """
-    Return per-account drop counts and item lists for the past 7 days.
+    Return per-account drop counts and item lists for the past
+    ``WEEKLY_SUMMARY_DAYS`` days.
 
     Returns:
         Dictionary keyed by account name with summary data.
     """
     data = _load_drops()
-    cutoff = date.today() - timedelta(days=7)
+    cutoff = date.today() - timedelta(days=WEEKLY_SUMMARY_DAYS)
     summary: dict[str, Any] = {}
 
     for account, records in data.items():
@@ -297,8 +312,8 @@ def clear_console_log(console_log_path: str) -> None:
     The file is *deleted* rather than truncated.  TF2 opens console.log in
     append mode and caches the file descriptor; if the file is merely
     truncated to zero bytes, TF2 keeps writing at the old end-of-file
-    offset, which leaves a block of null bytes at the start of the file and
-    causes all subsequent log lines to be unreadable until TF2 restarts.
+    offset, leaving a block of null bytes at the start of the file and
+    causing all subsequent log lines to be unreadable until TF2 restarts.
     Deleting the file forces TF2 to create a fresh one the next time it
     writes a log line, so the file always starts at offset 0.
 
@@ -307,11 +322,15 @@ def clear_console_log(console_log_path: str) -> None:
     """
     log_path = Path(console_log_path)
     if not log_path.exists():
-        log.info(f"console.log does not exist yet — nothing to clear: {log_path}")
+        log.info(
+            f"console.log does not exist yet — nothing to clear: {log_path}"
+        )
         return
     try:
         log_path.unlink()
-        log.info(f"console.log deleted (will be recreated by TF2): {log_path}")
+        log.info(
+            f"console.log deleted (will be recreated by TF2): {log_path}"
+        )
     except OSError as exc:
         log.warning(f"Could not delete console.log: {exc}")
 
