@@ -95,12 +95,13 @@ tf2-idle-farmer/
 ├── config/
 │   ├── accounts.txt         ← Steam login names (one per line)
 │   ├── servers.txt          ← idle server list (IP:PORT, one per line)
-│   └── settings.toml        ← all tuneable settings
+│   └── settings.toml        ← user-facing runtime settings (paths, timing, behaviour)
 ├── modules/
+│   ├── constants.py         ← all program-level constants (no magic numbers elsewhere)
 │   ├── steam_manager.py     ← switch account, launch/quit Steam
 │   ├── tf2_manager.py       ← launch TF2, generate autoexec.cfg, quit
 │   ├── human_behavior.py    ← random delays, mouse movement, MOTD dismiss
-│   ├── drop_tracker.py      ← parse console.log, save drops.json
+│   ├── drop_tracker.py      ← parse console.log, live watcher, save drops.json
 │   └── logger.py            ← rotating file + console logger
 ├── data/
 │   └── drops.json           ← drop history per account (auto-created)
@@ -108,6 +109,16 @@ tf2-idle-farmer/
 │   └── farmer.log           ← run log (auto-created)
 └── requirements.txt
 ```
+
+### What goes where
+
+`config/settings.toml` is for values **you** control: file paths, how long to
+idle, how long to wait for Steam to start. You are expected to edit this file.
+
+`modules/constants.py` is for values the **code** controls: Steam launch flags,
+TF2 process names, key sequences, Bézier curve parameters, log rotation limits.
+You should only touch this file if you are modifying the automation logic
+itself.
 
 ---
 
@@ -123,8 +134,8 @@ For each account in `accounts.txt`:
 6. Clear `console.log` so stale drops from previous sessions are not re-counted
 7. Launch TF2 with minimal-resource flags (`-novid -nosound -sw -low -condebug …`)
 8. Wait 20–40 s for the map to load, then automatically dismiss the server MOTD window (8 attempts × 4 s — covers servers with multiple stacked welcome screens)
-9. Idle 65–80 min with occasional random mouse moves / key presses every 3–10 min
-10. Parse `console.log` for drop messages → save results to `data/drops.json`
+9. Idle 65–80 min with a live background watcher tailing `console.log` for drops; occasional random mouse moves / key presses every 3–10 min
+10. Stop the watcher, do a final `console.log` scan, merge results → save to `data/drops.json`
 11. Quit TF2 → quit Steam → pause → move to next account
 
 > **Note on the MOTD screen:** The welcome popup that appears after connecting
@@ -173,6 +184,15 @@ tf2_startup_wait   = 150
 
 ---
 
+## Tuning automation behaviour
+
+Values in `settings.toml` cover the most common adjustments. For lower-level
+tuning — MOTD dismiss attempts, mouse movement parameters, idle action
+probability, drop-popup dismiss interval — edit `modules/constants.py` directly.
+Every constant is documented with its units and effect.
+
+---
+
 ## Logs & data
 
 - **`logs/farmer.log`** — full run log with timestamps, rotates at 5 MB (3 backups kept)
@@ -203,5 +223,5 @@ Example `drops.json` entry:
 | Steam shows account-picker GUI | Account has no saved password | Log in manually once with "Remember my password" checked |
 | `[WinError 123] filename syntax incorrect` | Wrong path in `settings.toml` (e.g. `CS:\` instead of `C:\`) | Fix the path; use forward slashes `/` |
 | TF2 startup timeout | Slow HDD / first launch after update | Increase `tf2_startup_wait` to `150` or more |
-| MOTD not dismissed / drop timer not starting | Server has extra welcome screens | Increase `dismiss_motd` attempts in `main.py` or `interval_sec` |
+| MOTD not dismissed / drop timer not starting | Server has extra welcome screens | Increase `MOTD_DISMISS_ATTEMPTS` in `modules/constants.py` |
 | No drops recorded after session | `console.log` not written | Verify `-condebug` is in launch options and `tf2_cfg_dir` path is correct |
