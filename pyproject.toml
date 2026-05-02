@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "TF2_Idle_Farmer"
-version = "1.1.1"
+version = "1.1.2"
 description = "Windows automation tool for cycling Steam accounts, idling in TF2, and tracking weekly drops."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -189,6 +189,7 @@ def run_account_session(
         if not tf2_ready:
             log.error(f"TF2 did not start for '{account}' — skipping.")
             tf2_manager.quit_tf2()
+            tf2_manager.cleanup_autoexec(tf2_cfg_dir)
             steam_manager.quit_steam(steam_exe)
             return False
 
@@ -235,9 +236,12 @@ def run_account_session(
             log.info(f"No items this session for '{account}'.")
 
         # ------------------------------------------------------------------
-        # 8. Clean up
+        # 8. Clean up — quit TF2, remove autoexec.cfg, quit Steam
         # ------------------------------------------------------------------
         tf2_manager.quit_tf2()
+        # Remove the farming autoexec so the next manual play session starts
+        # clean: no forced server connect, no performance caps.
+        tf2_manager.cleanup_autoexec(tf2_cfg_dir)
         human_behavior.wait(CLEANUP_WAIT_MIN_SEC, CLEANUP_WAIT_MAX_SEC)
         steam_manager.quit_steam(steam_exe)
 
@@ -249,17 +253,22 @@ def run_account_session(
 
     except Exception as exc:  # noqa: BLE001
         log.exception(f"Unexpected error during session for '{account}': {exc}")
-        _emergency_cleanup()
+        _emergency_cleanup(tf2_cfg_dir)
         return False
 
 
-def _emergency_cleanup() -> None:
-    """Kill TF2 and Steam if a session crashes mid-way."""
+def _emergency_cleanup(tf2_cfg_dir: str | None = None) -> None:
+    """Kill TF2 and Steam if a session crashes mid-way, and remove autoexec."""
     log.warning("Emergency cleanup: killing TF2 and Steam.")
     try:
         tf2_manager.quit_tf2()
     except Exception:  # noqa: BLE001
         pass
+    if tf2_cfg_dir:
+        try:
+            tf2_manager.cleanup_autoexec(tf2_cfg_dir)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         steam_manager.quit_steam()
     except Exception:  # noqa: BLE001

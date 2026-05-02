@@ -33,6 +33,7 @@ TF2_Idle_Farmer/
 │   └── farmer.log.3                      # Oldest retained rotated log backup
 └── modules/
     ├── __init__.py                       # Marks modules as a Python package
+    ├── _win_input.py
     ├── constants.py                      # Central registry of all program-level constants (no magic numbers elsewhere)
     ├── drop_tracker.py                   # Parses TF2 console.log and stores drop records in data/drops.json
     ├── human_behavior.py                 # Random waits, MOTD dismissal, mouse movement, and idle micro-actions

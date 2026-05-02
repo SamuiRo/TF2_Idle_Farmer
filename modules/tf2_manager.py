@@ -6,6 +6,7 @@ Responsibilities:
 - Launch TF2 with minimal-resource launch options
 - Wait for the game to be ready
 - Quit / kill TF2
+- Clean up autoexec.cfg after a session so normal play is unaffected
 """
 
 from __future__ import annotations
@@ -49,6 +50,33 @@ def generate_autoexec(server_ip_port: str, tf2_cfg_dir: str) -> Path:
     cfg_path.write_text(content, encoding="utf-8")
     log.info(f"autoexec.cfg generated → connect {server_ip_port}")
     return cfg_path
+
+
+def cleanup_autoexec(tf2_cfg_dir: str) -> None:
+    """
+    Delete the autoexec.cfg that was generated for the idle session.
+
+    This restores normal TF2 behaviour for manual play: no forced server
+    connect, no performance-capping settings (fps_max 20, mat_picmip 4, etc.).
+    The file is only deleted if it exists — if TF2 never started or the file
+    was already removed this call is a safe no-op.
+
+    Call this after :func:`quit_tf2` and before launching the next account
+    (or at the very end of the farming run).
+
+    Args:
+        tf2_cfg_dir: Path to the TF2 cfg directory (same value passed to
+                     :func:`generate_autoexec`).
+    """
+    cfg_path = Path(tf2_cfg_dir) / "autoexec.cfg"
+    if not cfg_path.exists():
+        log.info("autoexec.cfg does not exist — nothing to clean up.")
+        return
+    try:
+        cfg_path.unlink()
+        log.info(f"autoexec.cfg deleted after session: {cfg_path}")
+    except OSError as exc:
+        log.warning(f"Could not delete autoexec.cfg (non-critical): {exc}")
 
 
 def launch_tf2(steam_exe_path: str, extra_options: Optional[list[str]] = None) -> None:

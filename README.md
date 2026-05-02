@@ -87,29 +87,6 @@ python main.py --schedule
 
 ---
 
-## Project structure
-
-```
-tf2-idle-farmer/
-├── main.py                  ← entry point & orchestrator
-├── config/
-│   ├── accounts.txt         ← Steam login names (one per line)
-│   ├── servers.txt          ← idle server list (IP:PORT, one per line)
-│   └── settings.toml        ← user-facing runtime settings (paths, timing, behaviour)
-├── modules/
-│   ├── constants.py         ← all program-level constants (no magic numbers elsewhere)
-│   ├── steam_manager.py     ← switch account, launch/quit Steam
-│   ├── tf2_manager.py       ← launch TF2, generate autoexec.cfg, quit
-│   ├── human_behavior.py    ← random delays, mouse movement, MOTD dismiss
-│   ├── drop_tracker.py      ← parse console.log, live watcher, save drops.json
-│   └── logger.py            ← rotating file + console logger
-├── data/
-│   └── drops.json           ← drop history per account (auto-created)
-├── logs/
-│   └── farmer.log           ← run log (auto-created)
-└── requirements.txt
-```
-
 ### What goes where
 
 `config/settings.toml` is for values **you** control: file paths, how long to
@@ -136,12 +113,84 @@ For each account in `accounts.txt`:
 8. Wait 20–40 s for the map to load, then automatically dismiss the server MOTD window (8 attempts × 4 s — covers servers with multiple stacked welcome screens)
 9. Idle 65–80 min with a live background watcher tailing `console.log` for drops; occasional random mouse moves / key presses every 3–10 min
 10. Stop the watcher, do a final `console.log` scan, merge results → save to `data/drops.json`
-11. Quit TF2 → quit Steam → pause → move to next account
+11. **Delete `autoexec.cfg`** so normal manual play is not affected
+12. Quit TF2 → quit Steam → pause → move to next account
 
 > **Note on the MOTD screen:** The welcome popup that appears after connecting
 > *must* be dismissed for the drop timer to start. The death-notification popup
 > that appears when an item drops does not need to be closed — it disappears on
 > its own and does not affect the timer.
+
+---
+
+## autoexec.cfg — how it works and what the farmer does with it
+
+### What the farmer writes
+
+Before each idle session the farmer generates `autoexec.cfg` in your TF2 cfg
+directory. The file contains two things:
+
+- **Performance caps** (`fps_max 20`, `mat_picmip 4`, `-nosound`, etc.) that
+  reduce CPU/GPU load to a minimum while idling.
+- **`connect <server>`** — the command that makes TF2 join the idle server
+  automatically on startup.
+
+### Why the file is deleted after each session
+
+If `autoexec.cfg` were left in place after the farmer finishes, every
+subsequent manual launch of TF2 would:
+
+- Run at capped 20 FPS with degraded graphics and no sound.
+- Immediately try to connect to whatever idle server was last used.
+
+To prevent this, the farmer **deletes `autoexec.cfg` as part of cleanup**
+(step 11 above), immediately after TF2 is killed. This happens whether the
+session completes normally, is skipped due to a startup timeout, or crashes
+mid-way — the emergency cleanup path also removes the file.
+
+### If you had an autoexec.cfg before using the farmer
+
+The farmer **overwrites** (not merges) `autoexec.cfg` at the start of each
+session. If you had your own `autoexec.cfg` with personal settings, it will be
+lost when the farmer runs.
+
+**To preserve your personal autoexec**, rename it before running the farmer:
+
+```
+tf/cfg/autoexec.cfg      ← farmer will overwrite this
+tf/cfg/autoexec_mine.cfg ← your personal settings, safe here
+```
+
+Then load your personal file from within TF2's console manually, or add an
+`exec autoexec_mine` line to a different cfg that TF2 loads on its own (such
+as `tf/cfg/config.cfg`).
+
+### Manually deleting a leftover autoexec.cfg
+
+If the farmer was interrupted (e.g. you force-quit Python) before cleanup
+ran, `autoexec.cfg` may still exist. Delete it manually before your next
+normal play session:
+
+1. Open File Explorer and navigate to your TF2 cfg folder:
+   ```
+   C:\Program Files (x86)\Steam\steamapps\common\Team Fortress 2\tf\cfg\
+   ```
+   (adjust the drive letter if Steam is installed elsewhere)
+2. Delete `autoexec.cfg`.
+3. Launch TF2 normally — it will start with default settings.
+
+TF2 does not require `autoexec.cfg` to run. Deleting it is completely safe.
+
+### Checking whether a leftover file exists
+
+Open PowerShell or Command Prompt and run:
+
+```powershell
+Test-Path "C:\Program Files (x86)\Steam\steamapps\common\Team Fortress 2\tf\cfg\autoexec.cfg"
+```
+
+`True` means the file exists and should be deleted before playing manually.
+`False` means the folder is already clean.
 
 ---
 
@@ -225,3 +274,4 @@ Example `drops.json` entry:
 | TF2 startup timeout | Slow HDD / first launch after update | Increase `tf2_startup_wait` to `150` or more |
 | MOTD not dismissed / drop timer not starting | Server has extra welcome screens | Increase `MOTD_DISMISS_ATTEMPTS` in `modules/constants.py` |
 | No drops recorded after session | `console.log` not written | Verify `-condebug` is in launch options and `tf2_cfg_dir` path is correct |
+| TF2 launches at 1 FPS or connects to a server automatically after farming | Leftover `autoexec.cfg` from an interrupted session | Delete `autoexec.cfg` from your `tf/cfg/` folder manually (see [autoexec.cfg section](#autoexeccfg--how-it-works-and-what-the-farmer-does-with-it) above) |
