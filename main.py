@@ -256,36 +256,78 @@ def run_account_session(
 
     try:
         # ------------------------------------------------------------------
-        # 1. Ensure Steam is stopped before touching loginusers.vdf
+        # 0. Safety guard — abort if someone is actively playing right now
         # ------------------------------------------------------------------
-        if steam_manager.is_steam_running():
-            log.info("Steam is already running — shutting it down first.")
-            steam_manager.quit_steam(steam_exe)
-            human_behavior.wait(CLEANUP_WAIT_MIN_SEC, CLEANUP_WAIT_MAX_SEC)
-
-        # ------------------------------------------------------------------
-        # 2. Switch account
-        # ------------------------------------------------------------------
-        steam_manager.switch_account(login, loginusers_vdf)
-
-        # ------------------------------------------------------------------
-        # 3. Launch Steam and wait for it to be ready
-        # ------------------------------------------------------------------
-        steam_manager.launch_steam(steam_exe, username=login)
-        steam_ready = steam_manager.wait_for_steam_ready(
-            timeout_sec=timing["steam_startup_wait"]
-        )
-        if not steam_ready:
-            log.error(
-                f"Steam did not start in time for account '{login}' — skipping."
+        if steam_manager.is_game_running():
+            log.warning(
+                "A game process is currently running — "
+                "aborting session for '%s' to avoid interrupting active play. "
+                "Close the game and restart the farmer when ready.",
+                login,
             )
             return False
 
-        # Additional human-like delay after Steam is visible
-        human_behavior.wait(
-            timing.get("steam_warmup_min", STEAM_WARMUP_MIN_SEC_DEFAULT),
-            timing.get("steam_warmup_max", STEAM_WARMUP_MAX_SEC_DEFAULT),
+        # ------------------------------------------------------------------
+        # 1. Check whether the correct Steam account is already active
+        # ------------------------------------------------------------------
+        steam_is_running = steam_manager.is_steam_running()
+        active_account = (
+            steam_manager.get_active_steam_account(loginusers_vdf)
+            if steam_is_running
+            else None
         )
+        already_logged_in = (
+            steam_is_running
+            and active_account is not None
+            and active_account == login.lower()
+        )
+
+        if already_logged_in:
+            log.info(
+                f"Steam is already running as '{login}' — "
+                "skipping shutdown / re-login."
+            )
+        else:
+            # ---------------------------------------------------------------
+            # 1b. Wrong (or no) account is active — need to switch
+            # ---------------------------------------------------------------
+            if steam_is_running:
+                if active_account:
+                    log.info(
+                        f"Steam is running as '{active_account}', "
+                        f"need '{login}' — restarting Steam."
+                    )
+                else:
+                    log.info(
+                        "Steam is running but active account is unknown — "
+                        "restarting Steam to be safe."
+                    )
+                steam_manager.quit_steam(steam_exe)
+                human_behavior.wait(CLEANUP_WAIT_MIN_SEC, CLEANUP_WAIT_MAX_SEC)
+
+            # ---------------------------------------------------------------
+            # 2. Switch account in loginusers.vdf
+            # ---------------------------------------------------------------
+            steam_manager.switch_account(login, loginusers_vdf)
+
+            # ---------------------------------------------------------------
+            # 3. Launch Steam and wait for it to be ready
+            # ---------------------------------------------------------------
+            steam_manager.launch_steam(steam_exe, username=login)
+            steam_ready = steam_manager.wait_for_steam_ready(
+                timeout_sec=timing["steam_startup_wait"]
+            )
+            if not steam_ready:
+                log.error(
+                    f"Steam did not start in time for account '{login}' — skipping."
+                )
+                return False
+
+            # Additional human-like delay after Steam is visible
+            human_behavior.wait(
+                timing.get("steam_warmup_min", STEAM_WARMUP_MIN_SEC_DEFAULT),
+                timing.get("steam_warmup_max", STEAM_WARMUP_MAX_SEC_DEFAULT),
+            )
 
         # ------------------------------------------------------------------
         # 4. Pick a server and generate autoexec.cfg

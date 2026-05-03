@@ -51,9 +51,82 @@ def _find_account_key(users: dict, username: str) -> Optional[str]:
     return None
 
 
+# Known game / launcher process names that indicate someone is actively using
+# the machine.  TF2 processes are included so a running idle session is also
+# caught.  Extend this list if you run other Steam games.
+_GAME_PROCESS_NAMES: frozenset[str] = frozenset(
+    {
+        # TF2
+        "hl2.exe",
+        "tf_win64.exe",
+        # Common Steam games / launchers that indicate active play
+        "csgo.exe",
+        "cs2.exe",
+        "dota2.exe",
+        "steamwebhelper.exe",   # intentionally NOT included — it's always up
+    }
+)
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def get_active_steam_account(loginusers_vdf_path: str) -> str | None:
+    """
+    Return the Steam account login name that is currently marked as MostRecent
+    in loginusers.vdf, or None if the file cannot be read or no account is marked.
+
+    This reflects the account Steam would log in as (or is already logged in as)
+    — it does NOT make a live API call to Steam.
+
+    Args:
+        loginusers_vdf_path: Absolute path to loginusers.vdf.
+
+    Returns:
+        Lower-cased login name string, or None on any failure.
+    """
+    vdf_path = Path(loginusers_vdf_path)
+    if not vdf_path.exists():
+        log.debug(f"get_active_steam_account: VDF not found at {vdf_path}")
+        return None
+    try:
+        with vdf_path.open("r", encoding="utf-8") as fh:
+            data = vdf.load(fh)
+        users: dict = data.get("users", {})
+        for account_data in users.values():
+            if account_data.get("MostRecent") == "1":
+                name = account_data.get("AccountName", "")
+                return name.lower() if name else None
+    except Exception as exc:  # noqa: BLE001
+        log.warning(f"get_active_steam_account: could not parse VDF: {exc}")
+    return None
+
+
+def is_game_running() -> bool:
+    """
+    Return True if any known game process (TF2, CS2, Dota 2, …) is currently
+    running.
+
+    Use this before starting a farming session to avoid kicking a user who is
+    actively playing.  The check is intentionally conservative — only processes
+    whose names are in ``_GAME_PROCESS_NAMES`` are considered.
+
+    Returns:
+        True if a game process is found, False otherwise.
+    """
+    running: list[str] = []
+    for proc in psutil.process_iter(["name"]):
+        try:
+            name = proc.info["name"].lower()
+            if name in _GAME_PROCESS_NAMES:
+                running.append(proc.info["name"])
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            pass
+    if running:
+        log.debug(f"is_game_running: found game processes: {running}")
+        return True
+    return False
+
 
 def switch_account(username: str, loginusers_vdf_path: str) -> None:
     """
