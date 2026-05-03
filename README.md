@@ -36,12 +36,16 @@ falls back to the third-party `tomli` package which is API-compatible.
 
 ### 1. Configure accounts
 
-Edit `config/accounts.txt` — one Steam login name per line:
+Edit `config/accounts.txt` — one account per line. Two formats are supported and
+can be mixed freely:
 
 ```
-my_account_1
+my_account_1:76561198XXXXXXXXX
 my_account_2
 ```
+
+`login:SteamID64` enables drop detection via the Steam Inventory API (recommended).  
+`login` alone falls back to `console.log` parsing.
 
 > Every account must have been logged in manually at least once on this machine
 > with **"Remember my password"** checked so Steam can sign in automatically.
@@ -73,7 +77,36 @@ tf2_cfg_dir    = "C:/Program Files (x86)/Steam/steamapps/common/Team Fortress 2/
 > tf2_cfg_dir = "S:/SteamLibrary/steamapps/common/Team Fortress 2/tf/cfg"
 > ```
 
-### 4. Run
+### 4. (Optional) Enable Steam Inventory API drop tracking
+
+TF2 does not write item drops to `console.log` — they appear only as in-game
+chat messages that `-condebug` does not capture. The inventory API detects drops
+by comparing your inventory before and after each session.
+
+**Setup:**
+
+1. Get a free Steam Web API key at <https://steamcommunity.com/dev/apikey>
+2. Set your Steam profile inventory to **Public** (Steam profile → Edit Profile → Privacy Settings)
+3. Find your Steam ID (64-bit) at <https://steamidfinder.com>
+4. Add to `config/settings.toml`:
+
+```toml
+[steam_api]
+api_key = "YOUR_KEY_HERE"
+```
+
+5. Add Steam IDs to `config/accounts.txt`:
+
+```
+my_account_1:76561198XXXXXXXXX
+my_account_2:76561198XXXXXXXXX
+```
+
+If the API key is missing or a Steam ID is not set for an account, that account
+silently falls back to `console.log` parsing — no session is skipped.
+If an inventory is private, a warning is logged and the fallback applies.
+
+### 5. Run
 
 **Single run (all accounts once):**
 ```
@@ -94,8 +127,7 @@ idle, how long to wait for Steam to start. You are expected to edit this file.
 
 `modules/constants.py` is for values the **code** controls: Steam launch flags,
 TF2 process names, key sequences, Bézier curve parameters, log rotation limits.
-You should only touch this file if you are modifying the automation logic
-itself.
+You should only touch this file if you are modifying the automation logic itself.
 
 ---
 
@@ -109,12 +141,15 @@ For each account in `accounts.txt`:
 4. Wait for Steam to fully initialise and complete login (~15 s stabilisation after process detection)
 5. Pick a random server from `servers.txt` and generate `autoexec.cfg` with performance tweaks and `connect <server>`
 6. Clear `console.log` so stale drops from previous sessions are not re-counted
-7. Launch TF2 with minimal-resource flags (`-novid -nosound -sw -low -condebug …`)
-8. Wait 20–40 s for the map to load, then automatically dismiss the server MOTD window (8 attempts × 4 s — covers servers with multiple stacked welcome screens)
-9. Idle 65–80 min with a live background watcher tailing `console.log` for drops; occasional random mouse moves / key presses every 3–10 min
-10. Stop the watcher, do a final `console.log` scan, merge results → save to `data/drops.json`
-11. **Delete `autoexec.cfg`** so normal manual play is not affected
-12. Quit TF2 → quit Steam → pause → move to next account
+7. **Take a pre-session inventory snapshot** (if API key and Steam ID are configured)
+8. Launch TF2 with minimal-resource flags (`-novid -nosound -sw -low -condebug …`)
+9. Wait 20–40 s for the map to load, then automatically dismiss the server MOTD window (8 attempts × 4 s — covers servers with multiple stacked welcome screens)
+10. Idle 65–80 min with a live background watcher tailing `console.log` for drops; occasional random mouse moves / key presses every 3–10 min
+11. Quit TF2 and delete `autoexec.cfg`
+12. **Take a post-session inventory snapshot** and diff against the pre-session snapshot — the difference is the drops
+13. Save results to `data/drops.json` → move to next account
+
+Drop detection priority: inventory API diff → console.log watcher fallback.
 
 > **Note on the MOTD screen:** The welcome popup that appears after connecting
 > *must* be dismissed for the drop timer to start. The death-notification popup
@@ -138,15 +173,14 @@ directory. The file contains two things:
 ### Why the file is deleted after each session
 
 If `autoexec.cfg` were left in place after the farmer finishes, every
-subsequent manual launch of TF2 would:
+subsequent manual launch of TF2 would run at capped 20 FPS with degraded
+graphics and no sound, and immediately try to connect to whatever idle server
+was last used.
 
-- Run at capped 20 FPS with degraded graphics and no sound.
-- Immediately try to connect to whatever idle server was last used.
-
-To prevent this, the farmer **deletes `autoexec.cfg` as part of cleanup**
-(step 11 above), immediately after TF2 is killed. This happens whether the
-session completes normally, is skipped due to a startup timeout, or crashes
-mid-way — the emergency cleanup path also removes the file.
+The farmer **deletes `autoexec.cfg` as part of cleanup** immediately after TF2
+is killed. This happens whether the session completes normally, is skipped due
+to a startup timeout, or crashes mid-way — the emergency cleanup path also
+removes the file.
 
 ### If you had an autoexec.cfg before using the farmer
 
@@ -218,6 +252,9 @@ pause_between_accounts_max = 35   # max pause between accounts (seconds)
 shuffle_accounts = true   # randomise account order each run
 shuffle_servers  = true   # pick a random server each session
 mouse_activity   = true   # move mouse during idle
+
+[steam_api]
+api_key = "YOUR_KEY_HERE"   # optional — omit to disable inventory tracking
 ```
 
 ### Tuning for slow machines / HDD
@@ -274,4 +311,6 @@ Example `drops.json` entry:
 | TF2 startup timeout | Slow HDD / first launch after update | Increase `tf2_startup_wait` to `150` or more |
 | MOTD not dismissed / drop timer not starting | Server has extra welcome screens | Increase `MOTD_DISMISS_ATTEMPTS` in `modules/constants.py` |
 | No drops recorded after session | `console.log` not written | Verify `-condebug` is in launch options and `tf2_cfg_dir` path is correct |
+| No drops recorded despite items in inventory | Inventory API not configured | Add `[steam_api]` key to `settings.toml` and Steam ID to `accounts.txt`; set inventory to Public |
+| `Inventory is private` warning in logs | Steam profile privacy set to Friends-only or Private | Go to Steam profile → Edit Profile → Privacy Settings → set Inventory to Public |
 | TF2 launches at 1 FPS or connects to a server automatically after farming | Leftover `autoexec.cfg` from an interrupted session | Delete `autoexec.cfg` from your `tf/cfg/` folder manually (see [autoexec.cfg section](#autoexeccfg--how-it-works-and-what-the-farmer-does-with-it) above) |

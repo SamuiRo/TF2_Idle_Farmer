@@ -1,4 +1,19 @@
-# One Steam login name per line (the AccountName from loginusers.vdf)
-# Lines starting with # are ignored
-login1
-login2
+# accounts.txt — one account per line
+#
+# Format options (can be mixed):
+#   login_name                     ← drop detection via console.log only
+#   login_name:76561198XXXXXXXXX   ← drop detection via Steam Inventory API
+#
+# To find your Steam ID (64-bit):
+#   1. Open https://steamidfinder.com
+#   2. Enter your profile URL or vanity name
+#   3. Copy the "steamID64" value (starts with 7656...)
+#
+# The Steam Inventory API also requires [steam_api] api_key in settings.toml
+# and your inventory set to Public on your Steam profile privacy settings.
+# If the inventory is private or the API key is missing, the tool
+# automatically falls back to console.log parsing — no session is lost.
+
+my_login_1:76561198XXXXXXXXX
+my_login_2:76561198XXXXXXXXX
+my_login_3

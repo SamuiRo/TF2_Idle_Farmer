@@ -57,26 +57,51 @@ def load_settings() -> dict[str, Any]:
         return tomllib.load(fh)
 
 
-def load_accounts(settings: dict[str, Any]) -> list[str]:
+def load_accounts(settings: dict[str, Any]) -> list[dict[str, str | None]]:
+    """
+    Parse accounts.txt and return a list of account dicts.
+
+    Supported formats (can be mixed in the same file):
+        my_login                        → {"login": "my_login", "steam_id": None}
+        my_login:76561198XXXXXXXXX      → {"login": "my_login", "steam_id": "76561198..."}
+
+    Lines starting with '#' and blank lines are ignored.
+    The Steam ID part (after ':') is optional — accounts without one fall
+    back to console.log parsing for drop detection.
+    """
     accounts_path = CONFIG_DIR / "accounts.txt"
     if not accounts_path.exists():
         log.error(f"accounts.txt not found: {accounts_path}")
         sys.exit(1)
 
-    accounts = [
-        line.strip()
-        for line in accounts_path.read_text(encoding="utf-8").splitlines()
-        if line.strip() and not line.startswith("#")
-    ]
+    accounts: list[dict[str, str | None]] = []
+    for raw_line in accounts_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+
+        if ":" in line:
+            login, steam_id = line.split(":", 1)
+            login = login.strip()
+            steam_id = steam_id.strip() or None
+        else:
+            login = line
+            steam_id = None
+
+        if login:
+            accounts.append({"login": login, "steam_id": steam_id})
+
     if not accounts:
         log.error("accounts.txt is empty — nothing to do.")
         sys.exit(1)
 
     if settings.get("behavior", {}).get("shuffle_accounts", True):
         random.shuffle(accounts)
-        log.info(f"Account order shuffled: {accounts}")
+        logins = [a["login"] for a in accounts]
+        log.info(f"Account order shuffled: {logins}")
     else:
-        log.info(f"Accounts loaded (fixed order): {accounts}")
+        logins = [a["login"] for a in accounts]
+        log.info(f"Accounts loaded (fixed order): {logins}")
 
     return accounts
 
@@ -101,23 +126,113 @@ def load_servers(settings: dict[str, Any]) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Steam Inventory API helpers
+# ---------------------------------------------------------------------------
+
+def _get_api_key(settings: dict[str, Any]) -> str | None:
+    """Return the Steam API key from settings, or None if not configured."""
+    return settings.get("steam_api", {}).get("api_key") or None
+
+
+def _try_inventory_snapshot(
+    steam_id: str | None,
+    api_key: str | None,
+    label: str,
+) -> set[str] | None:
+    """
+    Attempt to take an inventory snapshot.
+
+    Returns a set of item-name strings, or None if:
+    - steam_id is absent
+    - api_key is absent
+    - the inventory is private / unreachable
+
+    The *label* is used only for log messages (e.g. "before" / "after").
+    """
+    if not steam_id:
+        log.debug(f"Inventory snapshot ({label}): no Steam ID — skipped.")
+        return None
+    if not api_key:
+        log.debug(f"Inventory snapshot ({label}): no API key — skipped.")
+        return None
+
+    # Import here so the rest of the program works fine even if the module
+    # has import errors (shouldn't happen, but defensive).
+    try:
+        from modules.steam_inventory import get_inventory  # noqa: PLC0415
+    except ImportError as exc:
+        log.warning(f"steam_inventory module unavailable: {exc}")
+        return None
+
+    log.info(
+        f"Taking inventory snapshot ({label}) for SteamID {steam_id}…"
+    )
+    snapshot = get_inventory(steam_id, api_key)
+    if snapshot is None:
+        log.warning(
+            f"Inventory snapshot ({label}) returned None for SteamID {steam_id}. "
+            f"Will fall back to console.log for drop detection."
+        )
+    else:
+        log.info(
+            f"Inventory snapshot ({label}): {len(snapshot)} distinct item type(s)."
+        )
+    return snapshot
+
+
+def _compute_new_items(
+    before: set[str] | None,
+    after: set[str] | None,
+    account: str,
+) -> list[str] | None:
+    """
+    Compute items that appeared after the session.
+
+    Returns:
+        A list of new item names if both snapshots are available,
+        or None to signal "fall back to console.log".
+    """
+    if before is None or after is None:
+        return None
+
+    new_items = sorted(after - before)
+    if new_items:
+        log.info(
+            f"Inventory diff for '{account}': {len(new_items)} new item(s): "
+            f"{new_items}"
+        )
+    else:
+        log.info(f"Inventory diff for '{account}': no new items detected via API.")
+    return new_items
+
+
+# ---------------------------------------------------------------------------
 # Core session logic
 # ---------------------------------------------------------------------------
 
 def run_account_session(
-    account: str,
+    account: dict[str, str | None],
     servers: list[str],
     settings: dict[str, Any],
 ) -> bool:
     """
     Execute a full idle farming session for *account*.
 
+    Args:
+        account:  Dict with keys "login" and "steam_id" (steam_id may be None).
+        servers:  List of "IP:PORT" server strings.
+        settings: Loaded settings.toml content.
+
     Returns:
         True on success, False if the session failed and was skipped.
     """
+    login: str = account["login"]
+    steam_id: str | None = account["steam_id"]
+
     paths = settings["paths"]
     timing = settings["timing"]
     behavior = settings.get("behavior", {})
+    api_key = _get_api_key(settings)
 
     steam_exe: str = paths["steam_exe"]
     loginusers_vdf: str = paths["loginusers_vdf"]
@@ -134,7 +249,9 @@ def run_account_session(
     mouse_activity: bool = behavior.get("mouse_activity", True)
 
     log.info("=" * 50)
-    log.info(f"Starting session for account: {account}")
+    log.info(f"Starting session for account: {login}")
+    if steam_id:
+        log.info(f"  Steam ID: {steam_id}")
     log.info("=" * 50)
 
     try:
@@ -149,18 +266,18 @@ def run_account_session(
         # ------------------------------------------------------------------
         # 2. Switch account
         # ------------------------------------------------------------------
-        steam_manager.switch_account(account, loginusers_vdf)
+        steam_manager.switch_account(login, loginusers_vdf)
 
         # ------------------------------------------------------------------
         # 3. Launch Steam and wait for it to be ready
         # ------------------------------------------------------------------
-        steam_manager.launch_steam(steam_exe, username=account)
+        steam_manager.launch_steam(steam_exe, username=login)
         steam_ready = steam_manager.wait_for_steam_ready(
             timeout_sec=timing["steam_startup_wait"]
         )
         if not steam_ready:
             log.error(
-                f"Steam did not start in time for account '{account}' — skipping."
+                f"Steam did not start in time for account '{login}' — skipping."
             )
             return False
 
@@ -180,6 +297,11 @@ def run_account_session(
         drop_tracker.clear_console_log(console_log_path)
 
         # ------------------------------------------------------------------
+        # 4b. Take pre-session inventory snapshot (if API configured)
+        # ------------------------------------------------------------------
+        snapshot_before = _try_inventory_snapshot(steam_id, api_key, "before")
+
+        # ------------------------------------------------------------------
         # 5. Launch TF2
         # ------------------------------------------------------------------
         tf2_manager.launch_tf2(steam_exe)
@@ -187,7 +309,7 @@ def run_account_session(
             timeout_sec=timing["tf2_startup_wait"]
         )
         if not tf2_ready:
-            log.error(f"TF2 did not start for '{account}' — skipping.")
+            log.error(f"TF2 did not start for '{login}' — skipping.")
             tf2_manager.quit_tf2()
             tf2_manager.cleanup_autoexec(tf2_cfg_dir)
             steam_manager.quit_steam(steam_exe)
@@ -210,7 +332,7 @@ def run_account_session(
         # ------------------------------------------------------------------
         # 6. Idle session (watcher runs in background the whole time)
         # ------------------------------------------------------------------
-        watcher = drop_tracker.ConsoleLogWatcher(console_log_path, account)
+        watcher = drop_tracker.ConsoleLogWatcher(console_log_path, login)
         watcher.start()
 
         session_start = time.time()
@@ -225,34 +347,59 @@ def run_account_session(
         actual_duration_min = (time.time() - session_start) / SECONDS_PER_MINUTE
 
         # ------------------------------------------------------------------
-        # 7. Collect drops
-        # ------------------------------------------------------------------
-        items = drop_tracker.check_and_save(
-            account, console_log_path, actual_duration_min, watcher=watcher
-        )
-        if items:
-            log.info(f"Items received for '{account}': {items}")
-        else:
-            log.info(f"No items this session for '{account}'.")
-
-        # ------------------------------------------------------------------
-        # 8. Clean up — quit TF2, remove autoexec.cfg, quit Steam
+        # 7. Quit TF2 before taking the post-session snapshot
+        #    (so the drop is already committed to the Steam inventory)
         # ------------------------------------------------------------------
         tf2_manager.quit_tf2()
-        # Remove the farming autoexec so the next manual play session starts
-        # clean: no forced server connect, no performance caps.
         tf2_manager.cleanup_autoexec(tf2_cfg_dir)
         human_behavior.wait(CLEANUP_WAIT_MIN_SEC, CLEANUP_WAIT_MAX_SEC)
+
+        # ------------------------------------------------------------------
+        # 7b. Take post-session inventory snapshot and compute diff
+        # ------------------------------------------------------------------
+        snapshot_after = _try_inventory_snapshot(steam_id, api_key, "after")
+        api_items = _compute_new_items(snapshot_before, snapshot_after, login)
+
+        # ------------------------------------------------------------------
+        # 8. Collect drops
+        # ------------------------------------------------------------------
+        if api_items is not None:
+            # API diff is authoritative — merge with anything the watcher
+            # caught live (belt-and-suspenders: watcher names may differ
+            # slightly from market_name, so we keep both)
+            items = api_items
+            for watcher_item in watcher.found_items:
+                if watcher_item not in items:
+                    log.info(
+                        f"  + console.log item not in API diff (keeping): "
+                        f"'{watcher_item}'"
+                    )
+                    items.append(watcher_item)
+            drop_tracker.save_drop(login, items, actual_duration_min)
+        else:
+            # Fallback: use console.log (existing logic unchanged)
+            items = drop_tracker.check_and_save(
+                login, console_log_path, actual_duration_min, watcher=watcher
+            )
+
+        if items:
+            log.info(f"Items received for '{login}': {items}")
+        else:
+            log.info(f"No items this session for '{login}'.")
+
+        # ------------------------------------------------------------------
+        # 9. Quit Steam
+        # ------------------------------------------------------------------
         steam_manager.quit_steam(steam_exe)
 
         log.info(
-            f"Session completed for '{account}' — "
+            f"Session completed for '{login}' — "
             f"duration: {actual_duration_min:.1f} min"
         )
         return True
 
     except Exception as exc:  # noqa: BLE001
-        log.exception(f"Unexpected error during session for '{account}': {exc}")
+        log.exception(f"Unexpected error during session for '{login}': {exc}")
         _emergency_cleanup(tf2_cfg_dir)
         return False
 
@@ -290,12 +437,27 @@ def run_weekly_farm() -> None:
     servers = load_servers(settings)
     timing = settings["timing"]
 
+    # Log whether API mode is active
+    api_key = _get_api_key(settings)
+    if api_key:
+        accounts_with_id = sum(1 for a in accounts if a["steam_id"])
+        log.info(
+            f"Steam Inventory API: enabled "
+            f"({accounts_with_id}/{len(accounts)} accounts have a Steam ID)"
+        )
+    else:
+        log.info(
+            "Steam Inventory API: disabled (no api_key in [steam_api] section). "
+            "Drop detection via console.log only."
+        )
+
     results: dict[str, bool] = {}
 
     for idx, account in enumerate(accounts, start=1):
-        log.info(f"Processing account {idx}/{len(accounts)}: {account}")
+        login = account["login"]
+        log.info(f"Processing account {idx}/{len(accounts)}: {login}")
         success = run_account_session(account, servers, settings)
-        results[account] = success
+        results[login] = success
 
         if idx < len(accounts):
             log.info("Pausing before next account…")

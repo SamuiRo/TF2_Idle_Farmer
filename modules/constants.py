@@ -33,7 +33,6 @@ TF2_LAUNCH_OPTIONS: list[str] = [
     "-nosteamcontroller",
     "-nohltv",
     "-particles", "1",
-    "-console",
     "-sw",
     "-w", "800",
     "-h", "600",

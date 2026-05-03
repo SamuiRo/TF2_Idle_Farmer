@@ -18,4 +18,7 @@ steam_warmup_max = 60
 [behavior]
 shuffle_accounts = true   # randomise account order every run
 shuffle_servers  = false   # pick a random idle server each time
-mouse_activity   = true   # move mouse during idle sessions
+mouse_activity   = false   # move mouse during idle sessions
+
+[steam_api]
+api_key = "your steam api key"
