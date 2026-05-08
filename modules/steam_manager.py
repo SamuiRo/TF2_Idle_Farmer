@@ -12,7 +12,7 @@ from __future__ import annotations
 import subprocess
 import time
 from pathlib import Path
-from typing import Optional
+
 
 import psutil
 import vdf
@@ -42,7 +42,7 @@ def _find_steam_exe(steam_exe_path: str) -> Path:
     return path
 
 
-def _find_account_key(users: dict, username: str) -> Optional[str]:
+def _find_account_key(users: dict, username: str) -> str | None:
     """Return the SteamID64 key for *username* (case-insensitive), or None."""
     username_lower = username.lower()
     for steam_id, data in users.items():
@@ -54,6 +54,8 @@ def _find_account_key(users: dict, username: str) -> Optional[str]:
 # Known game / launcher process names that indicate someone is actively using
 # the machine.  TF2 processes are included so a running idle session is also
 # caught.  Extend this list if you run other Steam games.
+# NOTE: steamwebhelper.exe is intentionally excluded — it runs permanently
+# as part of Steam itself and does NOT indicate active gameplay.
 _GAME_PROCESS_NAMES: frozenset[str] = frozenset(
     {
         # TF2
@@ -63,7 +65,6 @@ _GAME_PROCESS_NAMES: frozenset[str] = frozenset(
         "csgo.exe",
         "cs2.exe",
         "dota2.exe",
-        "steamwebhelper.exe",   # intentionally NOT included — it's always up
     }
 )
 
@@ -189,8 +190,8 @@ def switch_account(username: str, loginusers_vdf_path: str) -> None:
 
 def launch_steam(
     steam_exe_path: str,
-    username: Optional[str] = None,
-    extra_args: Optional[list[str]] = None,
+    username: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> None:
     """
     Start Steam as a detached background process.
@@ -212,7 +213,7 @@ def launch_steam(
     subprocess.Popen(cmd, close_fds=True)
 
 
-def quit_steam(steam_exe_path: Optional[str] = None) -> None:
+def quit_steam(steam_exe_path: str | None = None) -> None:
     """
     Gracefully exit Steam via ``steam://exit``, then wait for the process to
     terminate.  Falls back to SIGTERM if Steam does not close within

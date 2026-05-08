@@ -493,6 +493,22 @@ def run_weekly_farm() -> None:
             "Drop detection via console.log only."
         )
 
+    # If Steam is already running as one of the configured accounts, move that
+    # account to the front of the queue so we start farming it immediately
+    # without an unnecessary Steam restart.
+    if steam_manager.is_steam_running():
+        active_login = steam_manager.get_active_steam_account(
+            settings["paths"]["loginusers_vdf"]
+        )
+        if active_login:
+            matching = [a for a in accounts if a["login"].lower() == active_login]
+            if matching:
+                accounts = matching + [a for a in accounts if a not in matching]
+                log.info(
+                    f"Steam is already running as '{active_login}' — "
+                    f"moving it to the front of the queue."
+                )
+
     results: dict[str, bool] = {}
 
     for idx, account in enumerate(accounts, start=1):
