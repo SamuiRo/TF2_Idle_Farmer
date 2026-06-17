@@ -10,6 +10,7 @@ The check is intentionally conservative:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 import re
 import time
@@ -28,10 +29,12 @@ from modules.constants import (
     TF2_CONNECTION_DIALOG_GRACE_SEC_DEFAULT,
     TF2_CONNECTION_DIALOG_MATCHES_REQUIRED_DEFAULT,
     TF2_CONNECTION_DIALOG_MIN_GRAY_RATIO_DEFAULT,
+    TF2_CONNECTION_FAILURE_SCREENSHOT_DIR_NAME,
+    TF2_CONNECTION_FAILURE_SCREENSHOT_ENABLED_DEFAULT,
     TF2_CONNECTION_FAILURE_PATTERNS,
     TF2_CONNECTION_SUCCESS_PATTERNS,
 )
-from modules.logger import log
+from modules.logger import LOG_DIR, log
 
 
 @dataclass(frozen=True)
@@ -165,6 +168,61 @@ def check_tf2_connection(
     )
 
 
+def save_connection_failure_screenshot(
+    account: str,
+    server: str,
+    attempt: int,
+    config: Mapping[str, Any] | None = None,
+) -> Path | None:
+    """
+    Save a TF2 client-area screenshot after a failed connection check.
+
+    Returns the saved path, or None if screenshots are disabled/unavailable.
+    """
+    if not _get_bool(
+        config,
+        "save_failure_screenshot",
+        TF2_CONNECTION_FAILURE_SCREENSHOT_ENABLED_DEFAULT,
+    ):
+        return None
+
+    info = get_tf2_window_info()
+    if info is None:
+        log.debug("Connection failure screenshot skipped - TF2 window not found.")
+        return None
+
+    try:
+        screenshot = pyautogui.screenshot(
+            region=(
+                info.client_left,
+                info.client_top,
+                info.client_width,
+                info.client_height,
+            )
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.debug(f"Connection failure screenshot failed: {exc}")
+        return None
+
+    target_dir = LOG_DIR / TF2_CONNECTION_FAILURE_SCREENSHOT_DIR_NAME
+    target_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    filename = (
+        f"{timestamp}_attempt-{attempt}_"
+        f"{_safe_filename(account)}_{_safe_filename(server)}.png"
+    )
+    path = target_dir / filename
+
+    try:
+        screenshot.save(path)
+    except OSError as exc:
+        log.debug(f"Could not save connection failure screenshot: {exc}")
+        return None
+
+    log.info(f"Connection failure screenshot saved: {path}")
+    return path
+
+
 def _read_console_log(console_log_path: str) -> str:
     path = Path(console_log_path)
     if not path.exists():
@@ -259,6 +317,11 @@ def _last_console_line(text: str) -> str | None:
         if stripped:
             return stripped[:300]
     return None
+
+
+def _safe_filename(value: str) -> str:
+    safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", value.strip())
+    return safe.strip("._") or "unknown"
 
 
 def _get_bool(config: Mapping[str, Any] | None, key: str, default: bool) -> bool:

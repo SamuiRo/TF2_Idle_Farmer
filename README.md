@@ -140,10 +140,13 @@ enabled = true
 timeout_sec = 90
 interval_sec = 10
 require_success = false
+retry_servers_on_failure = true
+max_server_attempts = 3
 detect_failure_dialog = true
 failure_dialog_grace_sec = 30
 failure_dialog_matches_required = 2
 failure_dialog_detect_region = [180, 140, 440, 300]
+save_failure_screenshot = true
 
 [notifications]
 enabled = false
@@ -170,6 +173,8 @@ For each account, the farmer:
 5. Takes a pre-session inventory snapshot when API tracking is configured.
 6. Launches TF2 in a small low-resource window.
 7. Checks whether TF2 connected or hit a known connection failure.
+   Failed server connections can retry alternate servers before skipping the
+   account.
 8. Dismisses the server MOTD with startup-only keyboard input.
 9. Idles for the configured duration.
 10. Optionally dismisses item-drop popups through the configured popup mode.
@@ -202,7 +207,13 @@ It is deliberately conservative so a normal loading screen is less likely to
 be treated as a failure.
 
 If `[notifications]` is configured, failed connection checks send a best-effort
-Discord webhook and/or Telegram message with the account, server, and evidence.
+Discord webhook and/or Telegram message with the account, server, attempt, and
+evidence. When `save_failure_screenshot` is enabled, a TF2 client screenshot is
+saved under `logs/connection_failures/` and its path is included in the alert.
+
+`retry_servers_on_failure = true` lets the farmer quit TF2, generate a new
+`autoexec.cfg` for another server, and try again up to `max_server_attempts`
+before skipping the account.
 
 ## Popup Dismissal
 

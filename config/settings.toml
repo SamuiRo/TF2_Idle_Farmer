@@ -36,10 +36,13 @@ enabled = true
 timeout_sec = 90
 interval_sec = 10
 require_success = false
+retry_servers_on_failure = true
+max_server_attempts = 3
 detect_failure_dialog = true
 failure_dialog_grace_sec = 30
 failure_dialog_matches_required = 2
 failure_dialog_detect_region = [180, 140, 440, 300]
+save_failure_screenshot = true
 
 [notifications]
 enabled = false

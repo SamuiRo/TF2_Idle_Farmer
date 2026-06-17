@@ -47,6 +47,8 @@ from modules.constants import (
     SESSION_MAP_LOAD_WAIT_MIN_SEC,
     STEAM_WARMUP_MAX_SEC_DEFAULT,
     STEAM_WARMUP_MIN_SEC_DEFAULT,
+    TF2_CONNECTION_MAX_SERVER_ATTEMPTS_DEFAULT,
+    TF2_CONNECTION_RETRY_SERVERS_DEFAULT,
 )
 from modules.logger import log
 
@@ -303,24 +305,141 @@ def _coerce_float(value: Any, default: float, minimum: float | None = None) -> f
     return result
 
 
+def _coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
 def _notify_connection_failure(
     settings: dict[str, Any],
     login: str,
     server: str,
     result: tf2_health.ConnectionCheckResult,
+    attempt: int,
+    max_attempts: int,
+    screenshot_path: Path | None = None,
 ) -> None:
     """Send a best-effort alert for a failed TF2 server connection."""
     evidence = f"\nEvidence: {result.evidence}" if result.evidence else ""
+    screenshot = f"\nScreenshot: {screenshot_path}" if screenshot_path else ""
     notifier.send_alert(
         settings,
         title="TF2 Idle Farmer: connection failed",
         message=(
             f"Account: {login}\n"
             f"Server: {server}\n"
+            f"Attempt: {attempt}/{max_attempts}\n"
             f"Reason: {result.reason}"
             f"{evidence}"
+            f"{screenshot}"
         ),
     )
+
+
+def _get_server_attempts(servers: list[str], settings: dict[str, Any]) -> list[str]:
+    """Return the ordered server list to try for one account session."""
+    unique_servers = list(dict.fromkeys(servers))
+    behavior = settings.get("behavior", {})
+    connection_check = settings.get("connection_check", {})
+
+    if behavior.get("shuffle_servers", True):
+        random.shuffle(unique_servers)
+
+    retry_enabled = _coerce_bool(
+        connection_check.get("retry_servers_on_failure"),
+        TF2_CONNECTION_RETRY_SERVERS_DEFAULT,
+    )
+    max_attempts = _coerce_int(
+        connection_check.get("max_server_attempts"),
+        TF2_CONNECTION_MAX_SERVER_ATTEMPTS_DEFAULT,
+        minimum=1,
+    )
+    if not retry_enabled:
+        max_attempts = 1
+
+    return unique_servers[: min(max_attempts, len(unique_servers))]
+
+
+def _connect_tf2_with_server_retries(
+    login: str,
+    servers: list[str],
+    settings: dict[str, Any],
+    steam_exe: str,
+    tf2_cfg_dir: str,
+    console_log_path: str,
+) -> str | None:
+    """
+    Launch TF2 and retry different servers when the connection check fails.
+
+    Returns the server that passed the health check, or None if all attempts
+    failed.
+    """
+    timing = settings["timing"]
+    connection_check = settings.get("connection_check", {})
+    server_attempts = _get_server_attempts(servers, settings)
+    max_attempts = len(server_attempts)
+
+    for attempt, server in enumerate(server_attempts, start=1):
+        log.info(f"TF2 connection attempt {attempt}/{max_attempts}: {server}")
+        tf2_manager.generate_autoexec(server, tf2_cfg_dir)
+        drop_tracker.clear_console_log(console_log_path)
+
+        tf2_manager.launch_tf2(steam_exe)
+        tf2_ready = tf2_manager.wait_for_tf2_ready(
+            timeout_sec=timing["tf2_startup_wait"]
+        )
+        if not tf2_ready:
+            connection_result = tf2_health.ConnectionCheckResult(
+                False,
+                "TF2 did not start before the startup timeout.",
+            )
+            screenshot_path = None
+        else:
+            human_behavior.wait(
+                SESSION_MAP_LOAD_WAIT_MIN_SEC, SESSION_MAP_LOAD_WAIT_MAX_SEC
+            )
+            connection_result = tf2_health.check_tf2_connection(
+                console_log_path,
+                connection_check,
+            )
+            if connection_result.ok:
+                log.info(f"TF2 connection check passed: {connection_result.reason}")
+                return server
+
+            screenshot_path = tf2_health.save_connection_failure_screenshot(
+                login,
+                server,
+                attempt,
+                connection_check,
+            )
+
+        log.error(
+            f"TF2 connection attempt {attempt}/{max_attempts} failed for "
+            f"'{login}' on {server}: {connection_result.reason}"
+        )
+        if connection_result.evidence:
+            log.error(f"Connection check evidence: {connection_result.evidence}")
+        _notify_connection_failure(
+            settings,
+            login,
+            server,
+            connection_result,
+            attempt,
+            max_attempts,
+            screenshot_path,
+        )
+
+        tf2_manager.quit_tf2()
+        tf2_manager.cleanup_autoexec(tf2_cfg_dir)
+        if attempt < max_attempts:
+            human_behavior.wait(CLEANUP_WAIT_MIN_SEC, CLEANUP_WAIT_MAX_SEC)
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -447,57 +566,25 @@ def run_account_session(
             )
 
         # ------------------------------------------------------------------
-        # 4. Pick a server and generate autoexec.cfg
-        # ------------------------------------------------------------------
-        server = tf2_manager.get_random_server(servers)
-        tf2_manager.generate_autoexec(server, tf2_cfg_dir)
-
-        # Clear the TF2 console log so stale drops are not re-counted
-        drop_tracker.clear_console_log(console_log_path)
-
-        # ------------------------------------------------------------------
-        # 4b. Take pre-session inventory snapshot (if API configured)
+        # 4. Take pre-session inventory snapshot (if API configured)
         # ------------------------------------------------------------------
         snapshot_before = _try_inventory_snapshot(steam_id, api_key, "before")
 
         # ------------------------------------------------------------------
-        # 5. Launch TF2
+        # 5. Launch TF2 and retry alternate servers if connection fails
         # ------------------------------------------------------------------
-        tf2_manager.launch_tf2(steam_exe)
-        tf2_ready = tf2_manager.wait_for_tf2_ready(
-            timeout_sec=timing["tf2_startup_wait"]
-        )
-        if not tf2_ready:
-            log.error(f"TF2 did not start for '{login}' — skipping.")
-            tf2_manager.quit_tf2()
-            tf2_manager.cleanup_autoexec(tf2_cfg_dir)
-            steam_manager.quit_steam(steam_exe)
-            return False
-
-        # Wait for map load + autoexec connect
-        human_behavior.wait(
-            SESSION_MAP_LOAD_WAIT_MIN_SEC, SESSION_MAP_LOAD_WAIT_MAX_SEC
-        )
-
-        # Verify that TF2 actually reached the selected server before idling.
-        connection_result = tf2_health.check_tf2_connection(
+        server = _connect_tf2_with_server_retries(
+            login,
+            servers,
+            settings,
+            steam_exe,
+            tf2_cfg_dir,
             console_log_path,
-            settings.get("connection_check", {}),
         )
-        if not connection_result.ok:
-            log.error(
-                f"TF2 connection check failed for '{login}' on {server}: "
-                f"{connection_result.reason}"
-            )
-            if connection_result.evidence:
-                log.error(f"Connection check evidence: {connection_result.evidence}")
-            _notify_connection_failure(settings, login, server, connection_result)
-            tf2_manager.quit_tf2()
-            tf2_manager.cleanup_autoexec(tf2_cfg_dir)
+        if server is None:
+            log.error(f"All TF2 server connection attempts failed for '{login}'.")
             steam_manager.quit_steam(steam_exe)
             return False
-
-        log.info(f"TF2 connection check passed: {connection_result.reason}")
 
         # Dismiss the server MOTD / welcome screen - without this the drop
         # timer does not start. Death-drop popups do NOT need dismissal.

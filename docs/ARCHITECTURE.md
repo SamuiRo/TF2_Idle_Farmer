@@ -59,6 +59,7 @@ TF2_Idle_Farmer/
 - mouse activity
 - item-popup dismissal mode and coordinates
 - post-launch connection health checks
+- server retry count after connection failures
 - optional Discord/Telegram notifications
 - Steam Inventory API key and post-session polling
 
@@ -91,20 +92,23 @@ For each account:
    when API tracking is configured.
 7. `tf2_manager.launch_tf2()` starts TF2 through Steam with low-resource launch
    options.
-8. After map-load wait, `tf2_health.check_tf2_connection()` verifies that TF2
-   did not hit a known connection failure for the selected account/server.
-9. If the connection check fails, optional notifications are sent, TF2/Steam
-   are cleaned up, and the runner moves on.
-10. `human_behavior.dismiss_motd()` sends the startup MOTD
+8. `main._connect_tf2_with_server_retries()` launches TF2 with a generated
+   `autoexec.cfg`, waits for map load, and calls
+   `tf2_health.check_tf2_connection()`.
+9. If the connection check fails, a failure screenshot is saved when enabled,
+   optional notifications are sent, TF2 is cleaned up, and the runner tries the
+   next configured server up to `max_server_attempts`.
+10. If every server attempt fails, Steam is quit and the runner moves on.
+11. `human_behavior.dismiss_motd()` sends the startup MOTD
    key sequence.
-11. `ConsoleLogWatcher` starts tailing `console.log` as a fallback signal.
-12. `human_behavior.idle_session()` sleeps in randomized windows, performs
+12. `ConsoleLogWatcher` starts tailing `console.log` as a fallback signal.
+13. `human_behavior.idle_session()` sleeps in randomized windows, performs
     optional micro-actions, and optionally dismisses item-drop popups.
-13. The watcher stops, TF2 is killed, and generated `autoexec.cfg` is removed.
-14. The post-session inventory snapshot is polled several times if needed.
-15. Inventory delta is saved when API snapshots are available; otherwise
+14. The watcher stops, TF2 is killed, and generated `autoexec.cfg` is removed.
+15. The post-session inventory snapshot is polled several times if needed.
+16. Inventory delta is saved when API snapshots are available; otherwise
     `console.log` fallback results are saved.
-16. Steam is quit and the runner pauses before the next account.
+17. Steam is quit and the runner pauses before the next account.
 
 ## Core Modules
 
@@ -169,6 +173,8 @@ Owns post-launch connection checks before the idle timer starts:
 - scans the fresh `console.log` for known success/failure patterns
 - optionally screenshots a centered TF2 client-area region for a stable gray
   Source-engine failure dialog
+- saves full TF2 client-area screenshots to `logs/connection_failures/` after
+  failed server connection attempts when configured
 - returns a structured result so `main.py` can skip bad account/server
   sessions cleanly
 
@@ -182,6 +188,8 @@ Best-effort outbound alerts:
 
 - Discord webhook via `discord_webhook_url`
 - Telegram bot API via `telegram_bot_token` and `telegram_chat_id`
+- connection-failure alerts include account, server, attempt count, evidence,
+  and local screenshot path when available
 - notification failures are logged but never crash a farming run
 
 ### `modules/human_behavior.py`
