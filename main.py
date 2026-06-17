@@ -15,6 +15,7 @@ import argparse
 import random
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,8 @@ from modules import drop_tracker, human_behavior, steam_manager, tf2_manager
 from modules.constants import (
     CLEANUP_WAIT_MAX_SEC,
     CLEANUP_WAIT_MIN_SEC,
+    INVENTORY_POST_SESSION_POLL_ATTEMPTS_DEFAULT,
+    INVENTORY_POST_SESSION_POLL_INTERVAL_SEC_DEFAULT,
     SCHEDULE_DAY,
     SCHEDULE_POLL_SEC,
     SCHEDULE_TIME,
@@ -138,11 +141,11 @@ def _try_inventory_snapshot(
     steam_id: str | None,
     api_key: str | None,
     label: str,
-) -> set[str] | None:
+) -> Counter[str] | None:
     """
     Attempt to take an inventory snapshot.
 
-    Returns a set of item-name strings, or None if:
+    Returns item-name counts, or None if:
     - steam_id is absent
     - api_key is absent
     - the inventory is private / unreachable
@@ -181,8 +184,8 @@ def _try_inventory_snapshot(
 
 
 def _compute_new_items(
-    before: set[str] | None,
-    after: set[str] | None,
+    before: Counter[str] | None,
+    after: Counter[str] | None,
     account: str,
 ) -> list[str] | None:
     """
@@ -195,7 +198,8 @@ def _compute_new_items(
     if before is None or after is None:
         return None
 
-    new_items = sorted(after - before)
+    delta = after - before
+    new_items = _format_inventory_delta(delta)
     if new_items:
         log.info(
             f"Inventory diff for '{account}': {len(new_items)} new item(s): "
@@ -204,6 +208,92 @@ def _compute_new_items(
     else:
         log.info(f"Inventory diff for '{account}': no new items detected via API.")
     return new_items
+
+
+def _try_post_session_inventory_snapshot(
+    steam_id: str | None,
+    api_key: str | None,
+    before: Counter[str] | None,
+    settings: dict[str, Any],
+) -> Counter[str] | None:
+    """
+    Poll the inventory after TF2 exits so delayed Steam updates are not missed.
+    """
+    if before is None:
+        return _try_inventory_snapshot(steam_id, api_key, "after")
+
+    steam_api = settings.get("steam_api", {})
+    attempts = _coerce_int(
+        steam_api.get("inventory_poll_attempts"),
+        INVENTORY_POST_SESSION_POLL_ATTEMPTS_DEFAULT,
+        minimum=1,
+    )
+    interval_sec = _coerce_float(
+        steam_api.get("inventory_poll_interval_sec"),
+        INVENTORY_POST_SESSION_POLL_INTERVAL_SEC_DEFAULT,
+        minimum=0.0,
+    )
+
+    latest: Counter[str] | None = None
+    for attempt in range(1, attempts + 1):
+        latest = _try_inventory_snapshot(
+            steam_id,
+            api_key,
+            f"after {attempt}/{attempts}",
+        )
+        if latest is None:
+            if attempt < attempts and interval_sec > 0:
+                log.info(
+                    "Post-session inventory snapshot failed; "
+                    f"retrying in {interval_sec:.1f}s..."
+                )
+                time.sleep(interval_sec)
+            continue
+
+        delta = latest - before
+        if delta:
+            log.info(f"Inventory delta appeared on poll {attempt}/{attempts}.")
+            return latest
+
+        if attempt < attempts and interval_sec > 0:
+            log.info(
+                "No inventory delta yet; "
+                f"waiting {interval_sec:.1f}s before poll {attempt + 1}/{attempts}."
+            )
+            time.sleep(interval_sec)
+
+    return latest
+
+
+def _format_inventory_delta(delta: Counter[str]) -> list[str]:
+    """Format Counter deltas for drops.json/logging."""
+    items: list[str] = []
+    for name in sorted(delta):
+        count = delta[name]
+        if count <= 0:
+            continue
+        items.append(f"{name} (x{count})" if count > 1 else name)
+    return items
+
+
+def _coerce_int(value: Any, default: int, minimum: int | None = None) -> int:
+    try:
+        result = int(value)
+    except (TypeError, ValueError):
+        result = default
+    if minimum is not None:
+        result = max(minimum, result)
+    return result
+
+
+def _coerce_float(value: Any, default: float, minimum: float | None = None) -> float:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        result = default
+    if minimum is not None:
+        result = max(minimum, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +470,9 @@ def run_account_session(
         session_start = time.time()
         try:
             human_behavior.idle_session(
-                idle_duration, mouse_activity=mouse_activity
+                idle_duration,
+                mouse_activity=mouse_activity,
+                drop_popup_config=behavior,
             )
         finally:
             # Always stop the watcher — even if idle_session raises
@@ -399,7 +491,12 @@ def run_account_session(
         # ------------------------------------------------------------------
         # 7b. Take post-session inventory snapshot and compute diff
         # ------------------------------------------------------------------
-        snapshot_after = _try_inventory_snapshot(steam_id, api_key, "after")
+        snapshot_after = _try_post_session_inventory_snapshot(
+            steam_id,
+            api_key,
+            snapshot_before,
+            settings,
+        )
         api_items = _compute_new_items(snapshot_before, snapshot_after, login)
 
         # ------------------------------------------------------------------

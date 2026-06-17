@@ -1,148 +1,293 @@
 # Architecture
 
-TF2 Idle Farmer is a Windows-focused Python automation tool for cycling through saved Steam accounts, launching Team Fortress 2, idling on configured servers, and recording weekly item drops.
+This document is the developer-facing source of truth for how TF2 Idle Farmer
+is structured. User setup and troubleshooting live in the root `README.md`.
 
-## Directory structure
+## Design Boundaries
+
+The project uses only OS/client-level mechanisms:
+
+- Steam launch flags and saved-login state
+- TF2 config generation
+- normal Windows keyboard/mouse input
+- TF2 window screenshots
+- process discovery and shutdown
+- public Steam inventory endpoint
+- TF2 `console.log` as a fallback signal
+
+The project does not use memory reading, DLL injection, process hooks, packet
+manipulation, executable patching, or anti-cheat bypass techniques.
+
+## Directory Layout
 
 ```text
 TF2_Idle_Farmer/
-├── main.py                               # Entry point, scheduler, farming orchestrator
-├── pyproject.toml                        # Project metadata, dependencies, tool settings
+├── main.py
+├── pyproject.toml
 ├── config/
-│   ├── accounts.example.txt              # Example: login or login:SteamID64
-│   ├── accounts.txt                      # Local account list (git-ignored)
-│   ├── servers.example.txt               # Example idle server list
-│   ├── servers.txt                       # Local server list, one IP:PORT per line (git-ignored)
-│   └── settings.toml                     # User-facing config: paths, timing, behaviour toggles, API key
+│   ├── accounts.example.txt
+│   ├── accounts.txt              # local, git-ignored
+│   ├── servers.example.txt
+│   ├── servers.txt               # local, git-ignored
+│   └── settings.toml
 ├── data/
-│   └── drops.json                        # Persisted drop history per account (auto-created)
+│   └── drops.json                # auto-created
 ├── docs/
-│   ├── ARCHITECTURE.md                   # This file
-│   └── Resources.md                      # External links for finding TF2 idle servers
+│   ├── ARCHITECTURE.md
+│   └── Resources.md
 ├── logs/
-│   └── farmer.log                        # Rotating runtime log (+ up to 3 backups)
+│   └── farmer.log
 └── modules/
     ├── __init__.py
-    ├── _win_input.py                     # PostMessage keyboard input routed directly to the TF2 window
-    ├── constants.py                      # Central registry of all program-level constants
-    ├── drop_tracker.py                   # console.log parsing, ConsoleLogWatcher, drops.json persistence
-    ├── human_behavior.py                 # Random waits, MOTD dismissal, mouse movement, idle micro-actions
-    ├── logger.py                         # Shared console + rotating-file logger
-    ├── steam_inventory.py                # Steam Web Inventory API client for before/after drop detection
-    ├── steam_manager.py                  # Steam process control and loginusers.vdf account switching
-    └── tf2_manager.py                    # TF2 launch, autoexec.cfg generation, process detection, shutdown
+    ├── _win_input.py
+    ├── constants.py
+    ├── drop_tracker.py
+    ├── human_behavior.py
+    ├── logger.py
+    ├── steam_inventory.py
+    ├── steam_manager.py
+    └── tf2_manager.py
 ```
 
-## Configuration vs. constants
+## Configuration Model
 
-**`config/settings.toml`** — user-facing runtime configuration. Values the end user is expected to edit: paths, idle durations, startup timeouts, behaviour toggles, optional Steam API key.
+`config/settings.toml` is for user-facing runtime choices:
 
-**`modules/constants.py`** — developer-facing program constants. Values that are part of the application logic: process names, launch flags, regex patterns, Bézier curve parameters, MOTD key sequences, log rotation limits.
+- local paths
+- session timing
+- account/server shuffling
+- mouse activity
+- item-popup dismissal mode and coordinates
+- Steam Inventory API key and post-session polling
 
-Rule of thumb: if changing a value is a *user decision* (longer idles), it belongs in `settings.toml`. If it is a *code decision* (Bézier curve step count), it belongs in `constants.py`.
+`modules/constants.py` is for application defaults and developer-tuned values:
 
-## Runtime flow
+- process names
+- TF2 launch flags
+- generated `autoexec.cfg` template
+- MOTD key sequence defaults
+- popup detector defaults
+- logging and scheduler constants
 
-### Pre-session safety checks
+If a value is expected to change per machine or user, prefer `settings.toml`.
+If a value is part of program behavior and rarely changed, prefer
+`constants.py`.
 
-Before touching Steam or TF2, `main.py` runs two checks for each account:
+## Session Flow
 
-1. **Active game guard** — `steam_manager.is_game_running()` scans for known game processes (TF2, CS2, Dota 2, …). If any are found, the session is aborted with a warning rather than risk interrupting active play.
+For each account:
 
-2. **Active account check** — if Steam is already running, `steam_manager.get_active_steam_account()` reads `loginusers.vdf` to identify the current account:
-   - Already the correct account → skip shutdown and re-login, proceed directly to step 4.
-   - Wrong account (or unknown) → quit Steam, then continue with steps 2–3 below.
+1. `steam_manager.is_game_running()` aborts if a known game process is active.
+2. If Steam is already running, `get_active_steam_account()` checks
+   `loginusers.vdf`.
+3. If needed, Steam is closed, `switch_account()` marks the requested account
+   as most recent, and Steam is relaunched.
+4. `tf2_manager.generate_autoexec()` writes a temporary `autoexec.cfg` with
+   performance settings and `connect <server>`.
+5. `drop_tracker.clear_console_log()` deletes stale `console.log`.
+6. `steam_inventory.get_inventory()` takes the pre-session inventory snapshot
+   when API tracking is configured.
+7. `tf2_manager.launch_tf2()` starts TF2 through Steam with low-resource launch
+   options.
+8. After map-load wait, `human_behavior.dismiss_motd()` sends the startup MOTD
+   key sequence.
+9. `ConsoleLogWatcher` starts tailing `console.log` as a fallback signal.
+10. `human_behavior.idle_session()` sleeps in randomized windows, performs
+    optional micro-actions, and optionally dismisses item-drop popups.
+11. The watcher stops, TF2 is killed, and generated `autoexec.cfg` is removed.
+12. The post-session inventory snapshot is polled several times if needed.
+13. Inventory delta is saved when API snapshots are available; otherwise
+    `console.log` fallback results are saved.
+14. Steam is quit and the runner pauses before the next account.
 
-### Per-account session
-
-1. *(Skipped if already logged in)* `steam_manager.switch_account()` edits `loginusers.vdf` to set the target account as `MostRecent`.
-2. *(Skipped if already logged in)* `steam_manager.launch_steam()` starts Steam in silent login mode and waits for it to stabilise.
-3. `tf2_manager.generate_autoexec()` writes `autoexec.cfg` (performance caps + `connect <server>`). `drop_tracker.clear_console_log()` deletes any existing `console.log` so stale messages are not re-counted.
-4. `steam_inventory.get_inventory()` takes a pre-session snapshot (skipped if no API key or Steam ID).
-5. `tf2_manager.launch_tf2()` starts TF2 via `-applaunch 440` with the launch options in `constants.py`.
-6. `human_behavior.dismiss_motd()` dismisses the server MOTD so the drop timer starts. A `ConsoleLogWatcher` thread begins tailing `console.log` in the background.
-7. `human_behavior.idle_session()` holds the session for the configured duration with randomised sleeps, optional mouse movement, and occasional harmless key presses.
-8. TF2 is killed, `autoexec.cfg` is deleted. `steam_inventory.get_inventory()` takes a post-session snapshot; the diff is the authoritative drop list. `console.log` watcher results are used if the API is unavailable.
-9. `drop_tracker.save_drop()` appends the record to `data/drops.json`. `drop_tracker.clear_console_log()` deletes `console.log` (drops already saved; prevents growth from manual TF2 launches between farming runs).
-10. Steam is quit. A random pause separates accounts.
-
-## Core modules
+## Core Modules
 
 ### `main.py`
 
-Owns the high-level lifecycle: CLI arguments, optional scheduler, config loading, account/server iteration, pre-session safety checks, and emergency cleanup. Account entries support two formats:
+Owns orchestration: CLI flags, scheduler, settings loading, accounts/servers,
+session lifecycle, emergency cleanup, inventory polling, and drop persistence.
 
-```
-my_login                    → {"login": "my_login", "steam_id": None}
-my_login:76561198XXXXXXXXX  → {"login": "my_login", "steam_id": "76561198..."}
-```
+Important helpers:
+
+- `_try_inventory_snapshot()` returns `Counter[str] | None`.
+- `_try_post_session_inventory_snapshot()` retries after TF2 exits because
+  Steam inventory updates can lag.
+- `_compute_new_items()` formats inventory deltas for `drops.json`.
 
 ### `modules/steam_manager.py`
 
-Controls Steam-specific automation. Key functions:
+Controls Steam process and account state:
 
-- `get_active_steam_account(vdf_path)` — reads `loginusers.vdf` and returns the login name currently marked `MostRecent`, or `None`. Used to decide whether a Steam restart is needed.
-- `is_game_running()` — scans running processes against `_GAME_PROCESS_NAMES` to detect active play before a session starts.
-- `switch_account()` — edits `loginusers.vdf` to activate the target account without touching `RememberPassword` on other accounts.
-- `launch_steam()` / `quit_steam()` / `wait_for_steam_ready()` — process lifecycle with graceful exit + force-kill fallback.
+- active game guard
+- Steam process discovery
+- `loginusers.vdf` account switching
+- Steam launch and shutdown
 
 ### `modules/tf2_manager.py`
 
-Controls TF2-specific automation. Generates `autoexec.cfg` from the template in `constants.py`, launches app ID `440` via Steam, detects TF2 processes, and terminates TF2. `cleanup_autoexec()` deletes the generated file after each session (also called on crash).
+Controls TF2 process state:
+
+- temporary `autoexec.cfg` generation
+- Steam `-applaunch 440` launch
+- TF2 process detection
+- TF2 shutdown
+- generated config cleanup
 
 ### `modules/steam_inventory.py`
 
-Fetches TF2 inventory from `https://steamcommunity.com/inventory/{steamid}/440/2`. Returns a `set[str]` of item names (`"Name (xN)"` for stacked items) or `None` on failure. Retries up to 3 times (5 s delay); HTTP 403 exits immediately. Never raises — always safe to call.
+Fetches the public TF2 inventory endpoint and returns item-name quantities as
+`Counter[str]`.
+
+The inventory delta is the authoritative drop source when both pre-session and
+post-session snapshots are available. This is more reliable than UI parsing or
+`console.log` because it reflects the account inventory after Steam processes
+the drop.
 
 ### `modules/drop_tracker.py`
 
-Owns drop persistence and console.log interaction:
+Owns fallback drop persistence and `console.log` lifecycle:
 
-- `clear_console_log()` — deletes (not truncates) `console.log`. Deletion is required because TF2 keeps its file descriptor open; truncating leaves null bytes that corrupt subsequent log lines.
-- `ConsoleLogWatcher` — background thread that tails `console.log` during the session, processing only new bytes each poll.
-- `parse_console_log()` / `check_and_save()` — final scan and persistence fallback when the inventory API is unavailable.
-- `save_drop()` / `get_weekly_summary()` / `print_weekly_summary()` — `drops.json` read/write and reporting.
+- deletes stale `console.log` before launch
+- tails new `console.log` bytes during the session
+- runs a final full-file scan after idle
+- saves drop records to `data/drops.json`
+- prints weekly summaries
+
+`console.log` is fallback only. It is useful for diagnostics but should not be
+treated as the primary drop source.
 
 ### `modules/human_behavior.py`
 
-Timing and input helpers: random sleeps, repeated MOTD dismissal, Bézier-curve mouse movement, and occasional harmless key presses during idle windows. All tuning knobs imported from `constants.py`.
+Owns timing and user-like actions:
+
+- random waits
+- startup MOTD dismissal
+- optional mouse movement
+- occasional harmless key presses
+- configured item-drop popup dismissal
+
+MOTD and item-drop popups are intentionally separate:
+
+- MOTD is a startup blocker, so it uses a bounded keyboard sequence shortly
+  after map load.
+- Item-drop popup dismissal happens during idle and must not send blind Enter.
+  The default mode is `auto`: screenshot a small TF2 client-area region and
+  click the configured client coordinate only when the region looks like a TF2
+  popup.
 
 ### `modules/_win_input.py`
 
-Sends `WM_KEYDOWN` / `WM_KEYUP` via `PostMessage` directly to the TF2 window handle (found by class name `Valve001`). The user's active window retains focus. Key names follow the pyautogui convention and map to Virtual-Key codes via `_VK_MAP`.
+Windows input helpers:
+
+- find the TF2 top-level window by class name `Valve001`
+- send keyboard input to the TF2 window via `PostMessage`
+- compute TF2 window/client-area geometry
+- click TF2 client-area coordinates using normal OS mouse input
+
+Mouse clicks are aimed by window geometry. They are not hooks, injection, or
+game memory manipulation.
 
 ### `modules/constants.py`
 
-Central registry of every program-level constant — no magic numbers or hardcoded strings anywhere else. Constants are grouped by domain (Steam, TF2, human behaviour, logging, scheduler) and each carries a comment with units and effect.
+Central defaults for application behavior. Avoid scattering magic numbers
+across modules.
 
 ### `modules/logger.py`
 
-Creates the shared logger used across the project. Rotation size, backup count, and format are imported from `constants.py`. Writes to stdout and `logs/farmer.log`.
+Shared stdout and rotating-file logger.
 
-## Drop detection — two-layer strategy
+## Drop Detection Strategy
 
-**Layer 1 — Steam Inventory API (primary)**
-`get_inventory()` is called before TF2 launches and after TF2 quits. The set difference is the authoritative drop list. Requires a Steam Web API key in `settings.toml`, a SteamID64 per account in `accounts.txt`, and a Public inventory.
+### Primary: Steam Inventory API
 
-**Layer 2 — console.log watcher (fallback)**
-`ConsoleLogWatcher` tails `console.log` during the session; `parse_console_log()` does a final scan at the end. Used automatically when the API is not configured or fails. Reliability depends on TF2 writing drop messages that match `DROP_LOG_PATTERNS` — not guaranteed across all versions.
+The runner takes a pre-session inventory snapshot before TF2 launches and a
+post-session snapshot after TF2 exits. Post-session polling retries several
+times because inventory updates may be delayed.
 
-Items found by both layers are merged; the API result takes precedence.
+Snapshots are represented as `Counter[str]`, not `set[str]`, so duplicate item
+changes are handled correctly:
 
-## console.log lifecycle
+```text
+before: {"Scrap Metal": 2}
+after:  {"Scrap Metal": 3}
+delta:  ["Scrap Metal"]
+```
 
-`console.log` is deleted at two points each session:
+### Fallback: `console.log`
 
-- **Before launch** (`clear_console_log`) — removes stale lines from previous sessions so they are not re-detected.
-- **After drops are saved** (`clear_console_log`) — removes the file once its contents are no longer needed, preventing unbounded growth from manual TF2 launches between farming runs.
+`ConsoleLogWatcher` tails `console.log` and `parse_console_log()` does a final
+scan. This path is used when API tracking is unavailable or failed.
 
-If the farmer is interrupted before the post-session delete, the pre-session delete on the next run acts as a safety net.
+Reliability is limited because TF2 does not consistently write item drops to
+`console.log`. Keep this path for fallback/diagnostics, not as the primary
+design.
 
-## External dependencies
+## Popup Dismissal Strategy
 
-- `psutil` — process discovery and termination
-- `pyautogui` — MOTD dismissal, mouse movement
-- `vdf` — reading and writing `loginusers.vdf`
-- `schedule` — weekly scheduled execution
-- `tomllib` (stdlib 3.11+) / `tomli` (3.10 backport) — TOML settings parsing
-- `urllib` (stdlib) — Steam Inventory API requests
+Item-drop popup dismissal is separate from drop detection.
+
+Modes:
+
+- `auto` - screenshot a small TF2 client-area region; click only when it looks
+  like a centered popup.
+- `mouse` - click the configured TF2 client coordinate every check interval.
+- `off` - never dismiss item-drop popups during idle.
+- `keyboard_fallback` - legacy Enter/Escape behavior, kept only for manual
+  troubleshooting.
+
+Default mode is `auto`.
+
+The default coordinate assumes the normal `800x600` TF2 window:
+
+```toml
+drop_popup_click_x = 400
+drop_popup_click_y = 520
+drop_popup_detect_region = [220, 120, 360, 360]
+```
+
+If TF2 launch resolution changes, retune these values.
+
+## `console.log` Lifecycle
+
+`console.log` is deleted before each TF2 launch so old lines are not counted.
+It is also deleted after drops are saved.
+
+Delete, do not truncate. TF2 can keep an open file descriptor; truncating can
+leave null bytes and corrupt later reads.
+
+## Known Bad Approaches
+
+These have already been considered and should not be retried casually:
+
+- **Periodic blind Enter/Escape for item-drop popups.** Enter can interact with
+  server votes or menus instead of confirming the drop popup.
+- **Using `console.log` as primary drop detection.** Modern TF2 does not
+  reliably log item-drop messages.
+- **Searching `console.log` for chat-style drop lines.** Lines like
+  `Player has found: Item Name` may appear in-game but are not reliably written
+  by `-condebug`.
+- **Re-adding the TF2 `-console` launch flag.** Keep `-condebug`, but do not
+  launch the in-game console by default. When the console has focus, keyboard
+  input such as Enter can go to the console instead of the UI popup.
+- **Absolute screen coordinates.** They break with different monitor layouts,
+  window positions, DPI scaling, and border sizes.
+- **OCRing the popup item name as primary detection.** It is heavier, more
+  brittle, and less authoritative than inventory diff.
+- **Full OpenCV/template matching as the first solution.** Keep the detector
+  lightweight unless screenshots prove the simple heuristic is insufficient.
+- **Memory reading, DLL injection, hooks, packet manipulation, or binary
+  patching.** These are outside the project boundary.
+- **Truncating `console.log`.** Delete it instead to avoid stale file-offset
+  behavior.
+- **Keeping generated `autoexec.cfg` after a run.** It can affect manual TF2
+  play by reconnecting to an idle server or applying low-resource settings.
+
+## External Dependencies
+
+- `psutil` - process discovery and termination
+- `pyautogui` - screenshots and optional global mouse movement
+- `vdf` - reading/writing `loginusers.vdf`
+- `schedule` - weekly scheduled execution
+- `tomllib` / `tomli` - TOML settings parsing
+- `urllib` - Steam inventory HTTP requests
+- Windows `ctypes` APIs - TF2 window geometry and input

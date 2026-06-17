@@ -15,6 +15,7 @@ Key names follow the pyautogui convention (e.g. "return", "escape", "space",
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import time
 from typing import Sequence
 
@@ -38,6 +39,9 @@ except (AttributeError, OSError):
 
 WM_KEYDOWN: int = 0x0100
 WM_KEYUP: int = 0x0101
+MOUSEEVENTF_LEFTDOWN: int = 0x0002
+MOUSEEVENTF_LEFTUP: int = 0x0004
+MAPVK_VK_TO_VSC: int = 0
 
 # Virtual-Key code map — pyautogui key name → VK code
 _VK_MAP: dict[str, int] = {
@@ -69,6 +73,36 @@ _TF2_WINDOW_CLASS: str = "Valve001"
 
 
 # ---------------------------------------------------------------------------
+# Public data structures
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class TF2WindowInfo:
+    """Geometry for the TF2 top-level window and its client area."""
+
+    hwnd: int
+    left: int
+    top: int
+    right: int
+    bottom: int
+    client_left: int
+    client_top: int
+    client_width: int
+    client_height: int
+
+    @property
+    def width(self) -> int:
+        return self.right - self.left
+
+    @property
+    def height(self) -> int:
+        return self.bottom - self.top
+
+    def client_to_screen(self, x: int, y: int) -> tuple[int, int]:
+        return self.client_left + x, self.client_top + y
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 
@@ -80,10 +114,21 @@ def _find_tf2_hwnd() -> int | None:
     return int(hwnd) if hwnd else None
 
 
+def _get_cursor_pos() -> tuple[int, int] | None:
+    """Return the current cursor position, or None if unavailable."""
+    if not _WINDOWS_AVAILABLE:
+        return None
+    point = wintypes.POINT()
+    if not _user32.GetCursorPos(ctypes.byref(point)):
+        return None
+    return int(point.x), int(point.y)
+
+
 def _post_key(hwnd: int, vk: int) -> None:
     """Send WM_KEYDOWN then WM_KEYUP for *vk* to *hwnd*."""
-    lparam_down = (1) | (vk << 16)           # repeat=1, scan code approximation
-    lparam_up   = (1) | (vk << 16) | (1 << 30) | (1 << 31)  # prev=1, trans=1
+    scan_code = int(_user32.MapVirtualKeyW(vk, MAPVK_VK_TO_VSC))
+    lparam_down = 1 | (scan_code << 16)
+    lparam_up = 1 | (scan_code << 16) | (1 << 30) | (1 << 31)
     _user32.PostMessageW(hwnd, WM_KEYDOWN, vk, lparam_down)
     _user32.PostMessageW(hwnd, WM_KEYUP,   vk, lparam_up)
 
@@ -96,6 +141,56 @@ def _resolve_vk(key: str) -> int | None:
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
+
+def get_tf2_window_info() -> TF2WindowInfo | None:
+    """
+    Return TF2 window geometry, including client-area screen origin.
+
+    Coordinates used by game UI should normally be relative to the client area,
+    not the full window including borders/title bars.
+    """
+    if not _WINDOWS_AVAILABLE:
+        log.debug("_win_input: Windows API unavailable - no TF2 geometry.")
+        return None
+
+    hwnd = _find_tf2_hwnd()
+    if hwnd is None:
+        log.debug("_win_input: TF2 window not found - no geometry.")
+        return None
+
+    window_rect = wintypes.RECT()
+    if not _user32.GetWindowRect(hwnd, ctypes.byref(window_rect)):
+        log.debug("_win_input: GetWindowRect failed for TF2 window.")
+        return None
+
+    client_rect = wintypes.RECT()
+    if not _user32.GetClientRect(hwnd, ctypes.byref(client_rect)):
+        log.debug("_win_input: GetClientRect failed for TF2 window.")
+        return None
+
+    client_origin = wintypes.POINT(0, 0)
+    if not _user32.ClientToScreen(hwnd, ctypes.byref(client_origin)):
+        log.debug("_win_input: ClientToScreen failed for TF2 window.")
+        return None
+
+    info = TF2WindowInfo(
+        hwnd=hwnd,
+        left=int(window_rect.left),
+        top=int(window_rect.top),
+        right=int(window_rect.right),
+        bottom=int(window_rect.bottom),
+        client_left=int(client_origin.x),
+        client_top=int(client_origin.y),
+        client_width=int(client_rect.right - client_rect.left),
+        client_height=int(client_rect.bottom - client_rect.top),
+    )
+    log.debug(
+        "_win_input: TF2 window geometry: "
+        f"HWND={info.hwnd}, window={info.width}x{info.height}, "
+        f"client={info.client_width}x{info.client_height} "
+        f"at ({info.client_left}, {info.client_top})."
+    )
+    return info
 
 def press_key_in_tf2(key: str, delay_after: float = 0.0) -> bool:
     """
@@ -125,6 +220,63 @@ def press_key_in_tf2(key: str, delay_after: float = 0.0) -> bool:
 
     _post_key(hwnd, vk)
     log.debug(f"_win_input: Sent key '{key}' (VK=0x{vk:02X}) → HWND {hwnd}.")
+
+    if delay_after > 0:
+        time.sleep(delay_after)
+
+    return True
+
+
+def click_in_tf2_client(
+    x: int,
+    y: int,
+    delay_after: float = 0.0,
+    restore_cursor: bool = True,
+    foreground: bool = True,
+) -> bool:
+    """
+    Click a client-area coordinate inside the TF2 window.
+
+    This is intentionally a normal OS mouse click routed by window geometry,
+    not memory access, injection, hooks, or game-process tampering.
+    """
+    if not _WINDOWS_AVAILABLE:
+        log.debug("_win_input: Windows API unavailable - mouse click skipped.")
+        return False
+
+    info = get_tf2_window_info()
+    if info is None:
+        log.debug("_win_input: TF2 window not found - mouse click skipped.")
+        return False
+
+    if x < 0 or y < 0 or x >= info.client_width or y >= info.client_height:
+        log.warning(
+            "_win_input: TF2 click coordinate outside client area: "
+            f"({x}, {y}) for {info.client_width}x{info.client_height}."
+        )
+        return False
+
+    old_pos = _get_cursor_pos() if restore_cursor else None
+    screen_x, screen_y = info.client_to_screen(x, y)
+
+    if foreground:
+        _user32.SetForegroundWindow(info.hwnd)
+        time.sleep(0.05)
+
+    _user32.SetCursorPos(screen_x, screen_y)
+    time.sleep(0.03)
+    _user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.03)
+    _user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+    if old_pos is not None:
+        time.sleep(0.03)
+        _user32.SetCursorPos(old_pos[0], old_pos[1])
+
+    log.debug(
+        "_win_input: Clicked TF2 client coordinate "
+        f"({x}, {y}) -> screen ({screen_x}, {screen_y})."
+    )
 
     if delay_after > 0:
         time.sleep(delay_after)

@@ -166,6 +166,28 @@ DROP_DISMISS_KEYS: list[str] = ["return", "escape"]
 # Delay between drop-dismiss keys (seconds)
 DROP_DISMISS_KEY_DELAY_SEC: float = 0.15
 
+# Default popup-dismiss strategy:
+#   "off"               - never dismiss item-drop popups during idle
+#   "auto"              - screenshot a small UI region; click only if it looks
+#                         like a centered TF2 modal/drop popup
+#   "mouse"             - click the configured client coordinate each interval
+#   "keyboard_fallback" - old Enter/Escape behaviour; kept only as fallback
+DROP_POPUP_DISMISS_MODE_DEFAULT: str = "auto"
+
+# Client-area coordinate for the drop popup confirm button in the default
+# 800x600 TF2 window. These can be overridden from settings.toml.
+DROP_POPUP_CLICK_X: int = 400
+DROP_POPUP_CLICK_Y: int = 520
+
+# Screenshot region used by the conservative "auto" detector:
+# x, y, width, height in TF2 client-area pixels.
+DROP_POPUP_DETECT_REGION: tuple[int, int, int, int] = (220, 120, 360, 360)
+
+# Simple visual thresholds for the detector. This avoids OCR/OpenCV and keeps
+# resource use tiny. The detector is intentionally conservative.
+DROP_POPUP_DETECT_MIN_CONTRAST: float = 45.0
+DROP_POPUP_DETECT_MIN_ORANGE_RATIO: float = 0.01
+
 # ---------------------------------------------------------------------------
 # AFK-prevention key presses
 # ---------------------------------------------------------------------------
@@ -196,6 +218,11 @@ SESSION_MAP_LOAD_WAIT_MAX_SEC: float = 40.0
 
 # Poll interval for the live console.log watcher (seconds)
 CONSOLE_LOG_POLL_INTERVAL_SEC: float = 10.0
+
+# Post-session inventory polling. Steam inventory updates can lag behind TF2
+# shutdown, so the farmer can wait and retry before falling back.
+INVENTORY_POST_SESSION_POLL_ATTEMPTS_DEFAULT: int = 4
+INVENTORY_POST_SESSION_POLL_INTERVAL_SEC_DEFAULT: float = 15.0
 
 # Regex patterns for item-drop lines written by TF2.
 # Both "found" and "received" variants are matched for robustness.

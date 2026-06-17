@@ -20,5 +20,18 @@ shuffle_accounts = true   # randomise account order every run
 shuffle_servers  = false   # pick a random idle server each time
 mouse_activity   = false   # move mouse during idle sessions
 
+# Item-drop popup dismissal during idle:
+# "auto"              = screenshot a small TF2 UI region; click only if it looks like a popup
+# "mouse"             = click the configured TF2 client coordinate every check interval
+# "off"               = never dismiss drop popups during idle
+# "keyboard_fallback" = old Enter/Escape behavior; can interact with server votes
+drop_popup_dismiss = "auto"
+drop_popup_check_interval_sec = 120
+drop_popup_click_x = 400
+drop_popup_click_y = 520
+drop_popup_detect_region = [220, 120, 360, 360]
+
 [steam_api]
 api_key = "your steam api key"
+inventory_poll_attempts = 4
+inventory_poll_interval_sec = 15
