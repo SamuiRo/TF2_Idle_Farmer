@@ -213,6 +213,52 @@ SESSION_MAP_LOAD_WAIT_MIN_SEC: float = 20.0
 SESSION_MAP_LOAD_WAIT_MAX_SEC: float = 40.0
 
 # ---------------------------------------------------------------------------
+# TF2 connection health check
+# ---------------------------------------------------------------------------
+
+# Run a conservative post-launch check before starting the idle timer.
+TF2_CONNECTION_CHECK_ENABLED_DEFAULT: bool = True
+
+# Total time to keep polling console.log/screenshot signals after map-load wait.
+TF2_CONNECTION_CHECK_TIMEOUT_SEC_DEFAULT: float = 90.0
+
+# Seconds between health-check polls.
+TF2_CONNECTION_CHECK_INTERVAL_SEC_DEFAULT: float = 10.0
+
+# If False, timeout with no explicit failure is allowed to continue. This keeps
+# the check conservative on machines where console.log is sparse.
+TF2_CONNECTION_CHECK_REQUIRE_SUCCESS_DEFAULT: bool = False
+
+# Optional gray dialog heuristic for Source-engine connection failure popups.
+TF2_CONNECTION_DIALOG_DETECT_ENABLED_DEFAULT: bool = True
+TF2_CONNECTION_DIALOG_DETECT_REGION: tuple[int, int, int, int] = (180, 140, 440, 300)
+TF2_CONNECTION_DIALOG_GRACE_SEC_DEFAULT: float = 30.0
+TF2_CONNECTION_DIALOG_MATCHES_REQUIRED_DEFAULT: int = 2
+TF2_CONNECTION_DIALOG_MIN_GRAY_RATIO_DEFAULT: float = 0.55
+
+# console.log lines that indicate the account reached a server/map.
+TF2_CONNECTION_SUCCESS_PATTERNS: list[str] = [
+    r"\bConnected to .+?:\d+\b",
+    r"\bConnected to \d{1,3}(?:\.\d{1,3}){3}:\d+\b",
+]
+
+# console.log lines that indicate the connection failed or was rejected.
+TF2_CONNECTION_FAILURE_PATTERNS: list[str] = [
+    r"Connection failed after \d+ retries",
+    r"Failed to connect",
+    r"Disconnect(?:ed|):",
+    r"Server is full",
+    r"Bad password",
+    r"Invalid Steam UserID Ticket",
+    r"STEAM validation rejected",
+    r"You have been banned",
+    r"Kicked by",
+    r"No challenge response",
+    r"Client timed out",
+    r"Server uses different class tables",
+]
+
+# ---------------------------------------------------------------------------
 # Drop tracking / console.log parsing
 # ---------------------------------------------------------------------------
 

@@ -26,7 +26,14 @@ except ImportError:
 
 import schedule
 
-from modules import drop_tracker, human_behavior, steam_manager, tf2_manager
+from modules import (
+    drop_tracker,
+    human_behavior,
+    notifier,
+    steam_manager,
+    tf2_health,
+    tf2_manager,
+)
 from modules.constants import (
     CLEANUP_WAIT_MAX_SEC,
     CLEANUP_WAIT_MIN_SEC,
@@ -296,6 +303,26 @@ def _coerce_float(value: Any, default: float, minimum: float | None = None) -> f
     return result
 
 
+def _notify_connection_failure(
+    settings: dict[str, Any],
+    login: str,
+    server: str,
+    result: tf2_health.ConnectionCheckResult,
+) -> None:
+    """Send a best-effort alert for a failed TF2 server connection."""
+    evidence = f"\nEvidence: {result.evidence}" if result.evidence else ""
+    notifier.send_alert(
+        settings,
+        title="TF2 Idle Farmer: connection failed",
+        message=(
+            f"Account: {login}\n"
+            f"Server: {server}\n"
+            f"Reason: {result.reason}"
+            f"{evidence}"
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Core session logic
 # ---------------------------------------------------------------------------
@@ -452,8 +479,28 @@ def run_account_session(
             SESSION_MAP_LOAD_WAIT_MIN_SEC, SESSION_MAP_LOAD_WAIT_MAX_SEC
         )
 
-        # Dismiss the server MOTD / welcome screen — without this the drop
-        # timer does not start.  Death-drop popups do NOT need dismissal.
+        # Verify that TF2 actually reached the selected server before idling.
+        connection_result = tf2_health.check_tf2_connection(
+            console_log_path,
+            settings.get("connection_check", {}),
+        )
+        if not connection_result.ok:
+            log.error(
+                f"TF2 connection check failed for '{login}' on {server}: "
+                f"{connection_result.reason}"
+            )
+            if connection_result.evidence:
+                log.error(f"Connection check evidence: {connection_result.evidence}")
+            _notify_connection_failure(settings, login, server, connection_result)
+            tf2_manager.quit_tf2()
+            tf2_manager.cleanup_autoexec(tf2_cfg_dir)
+            steam_manager.quit_steam(steam_exe)
+            return False
+
+        log.info(f"TF2 connection check passed: {connection_result.reason}")
+
+        # Dismiss the server MOTD / welcome screen - without this the drop
+        # timer does not start. Death-drop popups do NOT need dismissal.
         human_behavior.dismiss_motd()
 
         log.info(

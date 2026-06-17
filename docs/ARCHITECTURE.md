@@ -9,7 +9,7 @@ The project uses only OS/client-level mechanisms:
 
 - Steam launch flags and saved-login state
 - TF2 config generation
-- normal Windows keyboard/mouse input
+- Windows keyboard/mouse window messages
 - TF2 window screenshots
 - process discovery and shutdown
 - public Steam inventory endpoint
@@ -58,6 +58,8 @@ TF2_Idle_Farmer/
 - account/server shuffling
 - mouse activity
 - item-popup dismissal mode and coordinates
+- post-launch connection health checks
+- optional Discord/Telegram notifications
 - Steam Inventory API key and post-session polling
 
 `modules/constants.py` is for application defaults and developer-tuned values:
@@ -89,16 +91,20 @@ For each account:
    when API tracking is configured.
 7. `tf2_manager.launch_tf2()` starts TF2 through Steam with low-resource launch
    options.
-8. After map-load wait, `human_behavior.dismiss_motd()` sends the startup MOTD
+8. After map-load wait, `tf2_health.check_tf2_connection()` verifies that TF2
+   did not hit a known connection failure for the selected account/server.
+9. If the connection check fails, optional notifications are sent, TF2/Steam
+   are cleaned up, and the runner moves on.
+10. `human_behavior.dismiss_motd()` sends the startup MOTD
    key sequence.
-9. `ConsoleLogWatcher` starts tailing `console.log` as a fallback signal.
-10. `human_behavior.idle_session()` sleeps in randomized windows, performs
+11. `ConsoleLogWatcher` starts tailing `console.log` as a fallback signal.
+12. `human_behavior.idle_session()` sleeps in randomized windows, performs
     optional micro-actions, and optionally dismisses item-drop popups.
-11. The watcher stops, TF2 is killed, and generated `autoexec.cfg` is removed.
-12. The post-session inventory snapshot is polled several times if needed.
-13. Inventory delta is saved when API snapshots are available; otherwise
+13. The watcher stops, TF2 is killed, and generated `autoexec.cfg` is removed.
+14. The post-session inventory snapshot is polled several times if needed.
+15. Inventory delta is saved when API snapshots are available; otherwise
     `console.log` fallback results are saved.
-14. Steam is quit and the runner pauses before the next account.
+16. Steam is quit and the runner pauses before the next account.
 
 ## Core Modules
 
@@ -156,6 +162,28 @@ Owns fallback drop persistence and `console.log` lifecycle:
 `console.log` is fallback only. It is useful for diagnostics but should not be
 treated as the primary drop source.
 
+### `modules/tf2_health.py`
+
+Owns post-launch connection checks before the idle timer starts:
+
+- scans the fresh `console.log` for known success/failure patterns
+- optionally screenshots a centered TF2 client-area region for a stable gray
+  Source-engine failure dialog
+- returns a structured result so `main.py` can skip bad account/server
+  sessions cleanly
+
+The screenshot detector is a fallback signal, not OCR. By default, a timeout
+with no explicit failure is allowed to continue so sparse `console.log` output
+does not cause false skips.
+
+### `modules/notifier.py`
+
+Best-effort outbound alerts:
+
+- Discord webhook via `discord_webhook_url`
+- Telegram bot API via `telegram_bot_token` and `telegram_chat_id`
+- notification failures are logged but never crash a farming run
+
 ### `modules/human_behavior.py`
 
 Owns timing and user-like actions:
@@ -182,10 +210,11 @@ Windows input helpers:
 - find the TF2 top-level window by class name `Valve001`
 - send keyboard input to the TF2 window via `PostMessage`
 - compute TF2 window/client-area geometry
-- click TF2 client-area coordinates using normal OS mouse input
+- click TF2 client-area coordinates by posting mouse messages to the TF2 window
 
-Mouse clicks are aimed by window geometry. They are not hooks, injection, or
-game memory manipulation.
+Mouse clicks are addressed to the TF2 window handle and use client-area
+coordinates. They do not move the user's real cursor and are not hooks,
+injection, or game memory manipulation.
 
 ### `modules/constants.py`
 

@@ -31,6 +31,23 @@ drop_popup_click_x = 400
 drop_popup_click_y = 520
 drop_popup_detect_region = [220, 120, 360, 360]
 
+[connection_check]
+enabled = true
+timeout_sec = 90
+interval_sec = 10
+require_success = false
+detect_failure_dialog = true
+failure_dialog_grace_sec = 30
+failure_dialog_matches_required = 2
+failure_dialog_detect_region = [180, 140, 440, 300]
+
+[notifications]
+enabled = false
+# discord_webhook_url = "https://discord.com/api/webhooks/..."
+# telegram_bot_token = "123456:ABCDEF..."
+# telegram_chat_id = "123456789"
+timeout_sec = 10
+
 [steam_api]
 api_key = "your steam api key"
 inventory_poll_attempts = 4

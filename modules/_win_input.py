@@ -1,13 +1,14 @@
 """
-Low-level Windows keyboard input routed directly to the TF2 window.
+Low-level Windows input routed directly to the TF2 window.
 
-Uses PostMessage(WM_KEYDOWN / WM_KEYUP) so keys are delivered only to the
+Uses PostMessage keyboard and mouse messages so input is delivered only to the
 TF2 process — the user's active window retains focus at all times.
 
 Public API
 ----------
 press_key_in_tf2(key, delay_after=0.0)  -> bool
 press_keys_in_tf2(keys, inter_key_delay=0.15) -> bool
+click_in_tf2_client(x, y, delay_after=0.0) -> bool
 
 Key names follow the pyautogui convention (e.g. "return", "escape", "space",
 "f5", "f").  A lookup table maps them to Virtual-Key codes.
@@ -29,6 +30,29 @@ try:
     import ctypes.wintypes as wintypes
 
     _user32 = ctypes.windll.user32  # type: ignore[attr-defined]
+    _user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    _user32.FindWindowW.restype = wintypes.HWND
+    _user32.GetCursorPos.argtypes = [ctypes.POINTER(wintypes.POINT)]
+    _user32.GetCursorPos.restype = wintypes.BOOL
+    _user32.MapVirtualKeyW.argtypes = [wintypes.UINT, wintypes.UINT]
+    _user32.MapVirtualKeyW.restype = wintypes.UINT
+    _user32.PostMessageW.argtypes = [
+        wintypes.HWND,
+        wintypes.UINT,
+        wintypes.WPARAM,
+        wintypes.LPARAM,
+    ]
+    _user32.PostMessageW.restype = wintypes.BOOL
+    _user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    _user32.GetWindowRect.restype = wintypes.BOOL
+    _user32.GetClientRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+    _user32.GetClientRect.restype = wintypes.BOOL
+    _user32.ClientToScreen.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.POINT)]
+    _user32.ClientToScreen.restype = wintypes.BOOL
+    _user32.SetForegroundWindow.argtypes = [wintypes.HWND]
+    _user32.SetForegroundWindow.restype = wintypes.BOOL
+    _user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+    _user32.SetCursorPos.restype = wintypes.BOOL
     _WINDOWS_AVAILABLE = True
 except (AttributeError, OSError):
     _WINDOWS_AVAILABLE = False
@@ -39,6 +63,10 @@ except (AttributeError, OSError):
 
 WM_KEYDOWN: int = 0x0100
 WM_KEYUP: int = 0x0101
+WM_MOUSEMOVE: int = 0x0200
+WM_LBUTTONDOWN: int = 0x0201
+WM_LBUTTONUP: int = 0x0202
+MK_LBUTTON: int = 0x0001
 MOUSEEVENTF_LEFTDOWN: int = 0x0002
 MOUSEEVENTF_LEFTUP: int = 0x0004
 MAPVK_VK_TO_VSC: int = 0
@@ -131,6 +159,55 @@ def _post_key(hwnd: int, vk: int) -> None:
     lparam_up = 1 | (scan_code << 16) | (1 << 30) | (1 << 31)
     _user32.PostMessageW(hwnd, WM_KEYDOWN, vk, lparam_down)
     _user32.PostMessageW(hwnd, WM_KEYUP,   vk, lparam_up)
+
+
+def _make_mouse_lparam(x: int, y: int) -> int:
+    """Pack client-area x/y coordinates into a Windows mouse-message LPARAM."""
+    return (y & 0xFFFF) << 16 | (x & 0xFFFF)
+
+
+def _post_mouse_click(hwnd: int, x: int, y: int) -> bool:
+    """Post a left mouse click to *hwnd* at client-area coordinate *(x, y)*."""
+    lparam = _make_mouse_lparam(x, y)
+    moved = bool(_user32.PostMessageW(hwnd, WM_MOUSEMOVE, 0, lparam))
+    down = bool(_user32.PostMessageW(hwnd, WM_LBUTTONDOWN, MK_LBUTTON, lparam))
+    time.sleep(0.03)
+    up = bool(_user32.PostMessageW(hwnd, WM_LBUTTONUP, 0, lparam))
+    return moved and down and up
+
+
+def _click_with_os_mouse(
+    info: TF2WindowInfo,
+    x: int,
+    y: int,
+    restore_cursor: bool,
+    foreground: bool,
+) -> bool:
+    """Legacy fallback: move the real cursor and click by screen coordinates."""
+    old_pos = _get_cursor_pos() if restore_cursor else None
+    screen_x, screen_y = info.client_to_screen(x, y)
+
+    if foreground:
+        _user32.SetForegroundWindow(info.hwnd)
+        time.sleep(0.05)
+
+    if not _user32.SetCursorPos(screen_x, screen_y):
+        return False
+
+    time.sleep(0.03)
+    _user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
+    time.sleep(0.03)
+    _user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
+
+    if old_pos is not None:
+        time.sleep(0.03)
+        _user32.SetCursorPos(old_pos[0], old_pos[1])
+
+    log.debug(
+        "_win_input: Legacy OS mouse click at TF2 client coordinate "
+        f"({x}, {y}) -> screen ({screen_x}, {screen_y})."
+    )
+    return True
 
 
 def _resolve_vk(key: str) -> int | None:
@@ -232,13 +309,16 @@ def click_in_tf2_client(
     y: int,
     delay_after: float = 0.0,
     restore_cursor: bool = True,
-    foreground: bool = True,
+    foreground: bool = False,
+    fallback_to_os_click: bool = False,
 ) -> bool:
     """
     Click a client-area coordinate inside the TF2 window.
 
-    This is intentionally a normal OS mouse click routed by window geometry,
-    not memory access, injection, hooks, or game-process tampering.
+    By default this posts mouse messages directly to the TF2 HWND, so the real
+    system cursor is not moved and the click is not sent to the foreground app.
+    The legacy OS-click path is available only when *fallback_to_os_click* is
+    explicitly enabled for troubleshooting.
     """
     if not _WINDOWS_AVAILABLE:
         log.debug("_win_input: Windows API unavailable - mouse click skipped.")
@@ -256,27 +336,21 @@ def click_in_tf2_client(
         )
         return False
 
-    old_pos = _get_cursor_pos() if restore_cursor else None
-    screen_x, screen_y = info.client_to_screen(x, y)
-
-    if foreground:
-        _user32.SetForegroundWindow(info.hwnd)
-        time.sleep(0.05)
-
-    _user32.SetCursorPos(screen_x, screen_y)
-    time.sleep(0.03)
-    _user32.mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0)
-    time.sleep(0.03)
-    _user32.mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0)
-
-    if old_pos is not None:
-        time.sleep(0.03)
-        _user32.SetCursorPos(old_pos[0], old_pos[1])
-
-    log.debug(
-        "_win_input: Clicked TF2 client coordinate "
-        f"({x}, {y}) -> screen ({screen_x}, {screen_y})."
-    )
+    if _post_mouse_click(info.hwnd, x, y):
+        log.debug(
+            "_win_input: Posted TF2 mouse click at client coordinate "
+            f"({x}, {y}) -> HWND {info.hwnd}."
+        )
+    elif fallback_to_os_click:
+        log.debug(
+            "_win_input: Window-message click failed; trying legacy OS mouse fallback."
+        )
+        if not _click_with_os_mouse(info, x, y, restore_cursor, foreground):
+            log.debug("_win_input: Legacy OS mouse fallback failed.")
+            return False
+    else:
+        log.debug("_win_input: TF2 window-message mouse click failed.")
+        return False
 
     if delay_after > 0:
         time.sleep(delay_after)

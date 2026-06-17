@@ -4,7 +4,7 @@ Windows-focused Python automation for cycling saved Steam accounts, launching
 Team Fortress 2, idling on configured servers, and recording weekly item drops.
 
 This project intentionally stays at the OS/client-configuration level: Steam
-launch flags, TF2 config files, normal Windows input, screenshots, process
+launch flags, TF2 config files, Windows window input, screenshots, process
 management, and the public Steam inventory endpoint. It does not read or patch
 game memory, inject code, hook the game process, or modify TF2 binaries.
 
@@ -135,6 +135,23 @@ drop_popup_click_x = 400
 drop_popup_click_y = 520
 drop_popup_detect_region = [220, 120, 360, 360]
 
+[connection_check]
+enabled = true
+timeout_sec = 90
+interval_sec = 10
+require_success = false
+detect_failure_dialog = true
+failure_dialog_grace_sec = 30
+failure_dialog_matches_required = 2
+failure_dialog_detect_region = [180, 140, 440, 300]
+
+[notifications]
+enabled = false
+# discord_webhook_url = "https://discord.com/api/webhooks/..."
+# telegram_bot_token = "123456:ABCDEF..."
+# telegram_chat_id = "123456789"
+timeout_sec = 10
+
 [steam_api]
 api_key = "YOUR_KEY_HERE"
 inventory_poll_attempts = 4
@@ -152,12 +169,13 @@ For each account, the farmer:
 4. Clears stale `console.log`.
 5. Takes a pre-session inventory snapshot when API tracking is configured.
 6. Launches TF2 in a small low-resource window.
-7. Dismisses the server MOTD with startup-only keyboard input.
-8. Idles for the configured duration.
-9. Optionally dismisses item-drop popups through the configured popup mode.
-10. Quits TF2, removes generated `autoexec.cfg`, polls the post-session
+7. Checks whether TF2 connected or hit a known connection failure.
+8. Dismisses the server MOTD with startup-only keyboard input.
+9. Idles for the configured duration.
+10. Optionally dismisses item-drop popups through the configured popup mode.
+11. Quits TF2, removes generated `autoexec.cfg`, polls the post-session
     inventory, computes new items, and saves `data/drops.json`.
-11. Quits Steam and pauses before the next account.
+12. Quits Steam and pauses before the next account.
 
 ## Drop Detection
 
@@ -171,6 +189,21 @@ SteamID64/API setup, but it is not considered reliable for modern TF2 drops.
 Item-drop popup dismissal is not drop detection. It only clears the visible UI
 popup during idle.
 
+## Connection Check
+
+After TF2 starts and the map-load wait finishes, the farmer polls the fresh
+`console.log` before starting the idle timer. Explicit connection failures like
+`Connection failed`, `Disconnected`, `Server is full`, or kick/ban messages
+skip the session for that account/server.
+
+The optional dialog detector screenshots a small centered TF2 client-area
+region and looks for a stable gray Source-engine dialog across multiple polls.
+It is deliberately conservative so a normal loading screen is less likely to
+be treated as a failure.
+
+If `[notifications]` is configured, failed connection checks send a best-effort
+Discord webhook and/or Telegram message with the account, server, and evidence.
+
 ## Popup Dismissal
 
 The recommended mode is:
@@ -179,10 +212,11 @@ The recommended mode is:
 drop_popup_dismiss = "auto"
 ```
 
-`auto` screenshots a small region of the TF2 client area and clicks the
-configured client-area coordinate only if the region looks like a centered TF2
-popup. This avoids periodic blind Enter presses, which can interact with server
-votes or menus.
+`auto` screenshots a small region of the TF2 client area and posts a mouse
+click to the TF2 window at the configured client-area coordinate only if the
+region looks like a centered TF2 popup. This avoids moving the real cursor and
+also avoids periodic blind Enter presses, which can interact with server votes
+or menus.
 
 Use `mouse` only after confirming `drop_popup_click_x` and
 `drop_popup_click_y` on your TF2 window. Use `off` to leave item popups alone.
